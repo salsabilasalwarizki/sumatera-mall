@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # SumateraMall Semantic Explorer
 
 SumateraMall is a bilingual Laravel application for discovering malls and stores in Sumatra's 10 provinces. The application queries an Apache Jena Fuseki RDF graph with SPARQL, uses Google Maps for maps and road routing, and can ground Gemini answers in bounded RDF results.
@@ -131,3 +132,6 @@ vendor\bin\pint --test
 npm run build
 python -m unittest discover -s scraper
 ```
+=======
+# sumatera-mall
+>>>>>>> ea152dde5c0c5643df37798acee791cf5d757d93
