@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\SparqlService;
+use App\Support\RdfImageUrl;
 use Illuminate\Http\Request;
 use Illuminate\View\View;
 
@@ -22,7 +23,7 @@ class MallController extends Controller
         $malls = $this->sparql->query(<<<SPARQL
 PREFIX mm: <http://sumateramall.org/ontology#>
 PREFIX schema: <http://schema.org/>
-SELECT DISTINCT ?mall ?name ?city ?province ?lat ?lng ?desc
+SELECT DISTINCT ?mall ?name ?city ?province ?lat ?lng ?desc ?image
 WHERE {
     ?mall a mm:Mall ;
           schema:name ?name ;
@@ -32,6 +33,7 @@ WHERE {
     ?provRes schema:name ?province .
     {$provinceFilter}
     OPTIONAL { ?mall schema:description ?desc }
+    OPTIONAL { ?mall schema:image ?image }
     OPTIONAL {
         ?mall schema:geo ?geo .
         ?geo schema:latitude ?lat ; schema:longitude ?lng .
@@ -39,6 +41,11 @@ WHERE {
 }
 ORDER BY ?province ?city ?name
 SPARQL, 60);
+        $malls = array_map(static function (array $mall): array {
+            $mall['image'] = RdfImageUrl::fromBinding($mall['image'] ?? null);
+
+            return $mall;
+        }, $malls);
 
         $provinces = $this->sparql->query(<<<'SPARQL'
 PREFIX mm: <http://sumateramall.org/ontology#>
@@ -62,7 +69,7 @@ SPARQL, 3600);
         $mallResults = $this->sparql->query(<<<SPARQL
 PREFIX mm: <http://sumateramall.org/ontology#>
 PREFIX schema: <http://schema.org/>
-SELECT ?name ?desc ?address ?website ?hours ?floors ?city ?province ?lat ?lng ?wheelchair ?parking ?elevator
+SELECT ?name ?desc ?address ?website ?hours ?floors ?city ?province ?lat ?lng ?wheelchair ?parking ?elevator ?image
 WHERE {
     {$mallIri} schema:name ?name ;
               mm:inCity ?cityRes ;
@@ -77,6 +84,7 @@ WHERE {
     OPTIONAL { {$mallIri} mm:wheelchairAccessible ?wheelchair }
     OPTIONAL { {$mallIri} mm:hasParking ?parking }
     OPTIONAL { {$mallIri} mm:hasElevator ?elevator }
+    OPTIONAL { {$mallIri} schema:image ?image }
     OPTIONAL {
         {$mallIri} schema:geo ?geo .
         ?geo schema:latitude ?lat ; schema:longitude ?lng .
@@ -86,6 +94,7 @@ SPARQL);
 
         abort_if(empty($mallResults), 404);
         $mall = $mallResults[0];
+        $mall['image'] = RdfImageUrl::fromBinding($mall['image'] ?? null);
         if (isset($mall['website'])) {
             $websiteScheme = parse_url($mall['website'], PHP_URL_SCHEME);
             if (! in_array(strtolower((string) $websiteScheme), ['http', 'https'], true)) {
@@ -115,6 +124,11 @@ WHERE {
 }
 ORDER BY ?category ?storeName
 SPARQL);
+        $stores = array_map(static function (array $store): array {
+            $store['image'] = RdfImageUrl::fromBinding($store['image'] ?? null);
+
+            return $store;
+        }, $stores);
 
         return view('malls.show', compact('mall', 'id', 'stores'));
     }

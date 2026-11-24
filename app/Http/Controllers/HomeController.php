@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\SparqlService;
+use App\Support\RdfImageUrl;
 use Carbon\Carbon;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
@@ -22,7 +23,7 @@ class HomeController extends Controller
             $malls = $this->sparql->query(<<<'SPARQL'
 PREFIX mm: <http://sumateramall.org/ontology#>
 PREFIX schema: <http://schema.org/>
-SELECT DISTINCT ?mall ?name ?city ?province ?address ?hours ?lat ?lng
+SELECT DISTINCT ?mall ?name ?city ?province ?address ?hours ?image ?lat ?lng
 WHERE {
     ?mall a mm:Mall ;
           schema:name ?name ;
@@ -32,6 +33,7 @@ WHERE {
     ?provinceResource schema:name ?province .
     OPTIONAL { ?mall schema:address ?address }
     OPTIONAL { ?mall mm:openingHoursText ?hours }
+    OPTIONAL { ?mall schema:image ?image }
     OPTIONAL { ?mall schema:geo ?geo . ?geo schema:latitude ?lat ; schema:longitude ?lng }
 }
 ORDER BY ?city ?name
@@ -49,6 +51,7 @@ SPARQL, 5, 8);
             ->map(function (array $mall) use ($now): array {
                 $mall['id'] = substr($mall['mall'], strrpos($mall['mall'], '/') + 1);
                 $mall['is_open'] = isset($mall['hours']) && $this->isOpenNow($mall['hours'], $now);
+                $mall['image'] = RdfImageUrl::fromBinding($mall['image'] ?? null);
 
                 return $mall;
             });

@@ -11,7 +11,10 @@
         <div class="chat-gold-gradient p-4 flex justify-between items-center">
             <div>
                 <div data-i18n="chat_assistant" class="font-display font-bold text-black">SumatraMall Assistant</div>
-                <div data-i18n="chat_powered_by" class="text-xs text-black/70">Didukung SPARQL</div>
+                <div data-i18n="{{ filled(config('services.chat.api_key')) ? 'chat_powered_by_ai' : 'chat_powered_by' }}"
+                     class="text-xs text-black/70">
+                    {{ filled(config('services.chat.api_key')) ? 'AI + data RDF' : 'Chat berbasis RDF — AI belum dikonfigurasi' }}
+                </div>
             </div>
             <button onclick="toggleChatbot()" class="text-amber-950 hover:text-white transition-colors">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -39,7 +42,7 @@
                    onkeypress="if(event.key==='Enter')sendMessage()"
                    placeholder="Ketik pertanyaan..."
                    class="flex-1 glass bg-transparent p-3 rounded-xl border border-white/10 focus:border-amber-400/60 focus:outline-none text-sm">
-            <button onclick="sendMessage()" class="chat-gold-gradient text-amber-950 px-4 rounded-xl hover:shadow-lg transition-all">
+            <button id="chatbot-send" onclick="sendMessage()" class="chat-gold-gradient text-amber-950 px-4 rounded-xl hover:shadow-lg transition-all">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
                 </svg>
@@ -70,10 +73,12 @@ function addMessage(text, isUser = false) {
 async function sendMessage() {
     const input = document.getElementById('chatbot-input');
     const message = input.value.trim();
-    if (!message) return;
+    if (!message || input.disabled) return;
 
     addMessage(message, true);
     input.value = '';
+    input.disabled = true;
+    document.getElementById('chatbot-send').disabled = true;
 
     const loading = document.createElement('div');
     loading.id = 'loading-indicator';
@@ -89,6 +94,7 @@ async function sendMessage() {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
+                'Accept': 'application/json',
                 'X-CSRF-TOKEN': '{{ csrf_token() }}'
             },
             body: JSON.stringify({
@@ -97,14 +103,27 @@ async function sendMessage() {
                 locale: document.documentElement.lang === 'id' ? 'id' : 'en'
             })
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.message || 'Layanan pencarian tidak tersedia.');
+        const responseText = await res.text();
+        let data;
+        try {
+            data = JSON.parse(responseText);
+        } catch {
+            throw new Error(window.sumateraTranslate('chat_response_invalid'));
+        }
+        if (!res.ok) throw new Error(data.message || window.sumateraTranslate('chat_response_invalid'));
+        if (typeof data.reply !== 'string' || data.reply.trim() === '') {
+            throw new Error(window.sumateraTranslate('chat_response_invalid'));
+        }
         document.getElementById('loading-indicator')?.remove();
         addMessage(data.reply);
         if (data.notice) addMessage(data.notice);
     } catch (e) {
         document.getElementById('loading-indicator')?.remove();
         addMessage(e.message || 'Maaf, terjadi kesalahan koneksi.');
+    } finally {
+        input.disabled = false;
+        document.getElementById('chatbot-send').disabled = false;
+        input.focus();
     }
 }
 </script>

@@ -42,17 +42,14 @@ return [
     'osm' => [
         'overpass_url' => env('OSM_OVERPASS_URL', 'https://overpass-api.de/api/interpreter'),
         'osrm_url' => env('OSRM_URL', 'https://router.project-osrm.org'),
+        'geocoding_url' => env('OSM_GEOCODING_URL', 'https://nominatim.openstreetmap.org/search'),
         'user_agent' => env('OSM_USER_AGENT', 'SumateraMallSemanticExplorer/1.0'),
     ],
-    'google_maps' => [
-        'browser_key' => env('GOOGLE_MAPS_BROWSER_KEY'),
-        'server_key' => env('GOOGLE_MAPS_SERVER_KEY'),
-        'routes_url' => env('GOOGLE_MAPS_ROUTES_URL', 'https://routes.googleapis.com/directions/v2:computeRoutes'),
-    ],
-    'gemini' => [
-        'api_key' => env('GEMINI_API_KEY'),
-        'model' => env('GEMINI_MODEL', 'gemini-2.5-flash'),
-        'endpoint' => env('GEMINI_API_ENDPOINT', 'https://generativelanguage.googleapis.com/v1beta/models'),
+    'chat' => [
+        'api_key' => env('NVIDIA_API_KEY', env('CHAT_API_KEY')),
+        'model' => env('NVIDIA_API_MODEL', env('CHAT_API_MODEL', 'mistralai/mistral-large-4-1t-a52b')),
+        'base_url' => env('NVIDIA_API_BASE_URL', env('CHAT_API_BASE_URL', 'https://integrate.api.nvidia.com/v1')),
+        'timeout' => (int) env('NVIDIA_API_TIMEOUT', 60),
     ],
     'budget' => [
         'price_level_estimates' => [

@@ -47,6 +47,24 @@ class SparqlService
     /**
      * @throws ConnectionException
      */
+    public function ask(string $sparql, int $timeoutSeconds = 30): bool
+    {
+        $data = Http::timeout(max(1, $timeoutSeconds))
+            ->accept('application/sparql-results+json')
+            ->get($this->queryEndpoint, ['query' => $sparql])
+            ->throw()
+            ->json();
+
+        if (! is_array($data) || ! array_key_exists('boolean', $data) || ! is_bool($data['boolean'])) {
+            throw new RuntimeException('Fuseki returned an invalid SPARQL ASK document.');
+        }
+
+        return $data['boolean'];
+    }
+
+    /**
+     * @throws ConnectionException
+     */
     public function update(string $sparql): bool
     {
         Http::timeout(30)

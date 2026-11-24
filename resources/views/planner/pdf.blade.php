@@ -14,7 +14,7 @@
 </head>
 <body>
     <h1>{{ $english ? 'SumatraMall Hopping Itinerary' : 'Rencana Mall Hopping SumatraMall' }}</h1>
-    <p class="muted">{{ $english ? 'Created' : 'Dibuat' }} {{ $itinerary['plannedAt'] }}. {{ $english ? 'Route source:' : 'Rute:' }} {{ $itinerary['source'] === 'google_maps' ? 'Google Maps Routes API' : ($itinerary['source'] === 'openstreetmap' ? 'OpenStreetMap / OSRM' : ($english ? 'straight-line estimate' : 'estimasi garis lurus')) }}.</p>
+    <p class="muted">{{ $english ? 'Created' : 'Dibuat' }} {{ $itinerary['plannedAt'] }}. {{ $english ? 'Route source:' : 'Rute:' }} {{ $itinerary['source'] === 'openstreetmap' ? 'OpenStreetMap / OSRM' : ($english ? 'straight-line estimate' : 'estimasi garis lurus') }}.</p>
     <div class="summary">
         {{ $english ? 'Total distance:' : 'Total jarak:' }} {{ number_format($itinerary['totalDistance'] / 1000, 1) }} km<br>
         {{ $english ? 'Total time:' : 'Total waktu:' }} {{ floor($itinerary['totalDuration'] / 3600) }} {{ $english ? 'hours' : 'jam' }} {{ floor(($itinerary['totalDuration'] % 3600) / 60) }} {{ $english ? 'minutes' : 'menit' }}

@@ -110,11 +110,17 @@
                    class="mall-landing__card" data-open-mall data-city="{{ $mall['city'] }}"
                    data-lat="{{ $mall['lat'] ?? '' }}" data-lng="{{ $mall['lng'] ?? '' }}">
                     <div class="mall-landing__card-art" data-art="{{ $loop->index % 4 }}">
+                        @if(!empty($mall['image']))
+                        <img src="{{ $mall['image'] }}" alt="{{ $mall['name'] }}" class="absolute inset-0 w-full h-full object-cover" loading="lazy" decoding="async">
+                        <span class="absolute inset-0 bg-gradient-to-t from-black/50 via-black/10 to-transparent" aria-hidden="true"></span>
+                        @endif
                         <span class="mall-landing__card-city">{{ $mall['city'] }}</span>
+                        @if(empty($mall['image']))
                         <svg class="mall-landing__building" viewBox="0 0 100 76" aria-hidden="true">
                             <path d="M12 72V31h24v41M36 72V12h30v60M66 72V26h22v46M5 72h90" />
                             <path d="M20 40h8m-8 9h8m-8 9h8m16-36h7m8 0h7M44 34h7m8 0h7M44 45h7m8 0h7M44 56h7m8 0h7m7-20h7m-7 11h7m-7 11h7" />
                         </svg>
+                        @endif
                         <span class="mall-landing__open-badge">
                             <span></span>
                             <span data-i18n="landing_open_badge">Buka sekarang</span>

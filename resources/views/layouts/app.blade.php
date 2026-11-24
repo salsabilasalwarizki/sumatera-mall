@@ -12,11 +12,10 @@
     <meta property="og:type" content="@yield('og_type', 'website')" />
     <meta property="og:url" content="{{ url()->current() }}" />
 
-    <script>window.sumateraGoogleMapsKey = {{ Illuminate\Support\Js::from(config('services.google_maps.browser_key')) }};</script>
     @vite(['resources/css/app.css', 'resources/js/app.js'])
     @stack('styles')
 </head>
-<body class="animated-bg min-h-screen text-white font-body">
+<body class="min-h-screen text-white font-body">
 
     <nav class="site-nav fixed top-4 left-1/2 -translate-x-1/2 z-50 w-[95%] max-w-7xl"
          aria-label="Main navigation" data-i18n-aria-label="nav_aria">

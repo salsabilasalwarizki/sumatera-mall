@@ -1,7 +1,6 @@
 <?php
 
 use App\Models\ChatLog;
-use App\Services\GoogleMapsService;
 use App\Services\OsmService;
 use App\Services\SparqlService;
 use Carbon\Carbon;
@@ -10,6 +9,10 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 
 uses(RefreshDatabase::class);
+
+beforeEach(function () {
+    config(['services.chat.api_key' => null]);
+});
 
 test('the homepage shows open malls and provides a store search scoped to a mall', function () {
     $this->travelTo(Carbon::parse('2026-11-14 15:00:00', 'Asia/Jakarta'));
@@ -22,6 +25,7 @@ test('the homepage shows open malls and provides a store search scoped to a mall
                     'city' => ['value' => 'Medan'],
                     'province' => ['value' => 'Sumatera Utara'],
                     'hours' => ['value' => '10.00 - 22.00'],
+                    'image' => ['value' => 'http://localhost:8000/images/malls/open-plaza.jpg'],
                     'lat' => ['value' => '3.5952'],
                     'lng' => ['value' => '98.6722'],
                 ],
@@ -39,6 +43,7 @@ test('the homepage shows open malls and provides a store search scoped to a mall
     $this->get('/')
         ->assertOk()
         ->assertSee('Open Plaza')
+        ->assertSee('src="'.asset('images/malls/open-plaza.jpg').'"', false)
         ->assertSee('data-lat="3.5952"', false)
         ->assertSee('data-lng="98.6722"', false)
         ->assertDontSee('<h3>Closed Plaza</h3>', false)
@@ -55,6 +60,25 @@ test('the homepage shows open malls and provides a store search scoped to a mall
         ->assertSee('images/logo-sumateramall.png');
 });
 
+test('the mall directory renders local photos returned by Fuseki', function () {
+    Http::fake([
+        '*' => Http::response([
+            'results' => ['bindings' => [[
+                'mall' => ['value' => 'http://sumateramall.org/resource/Mall/sun_plaza'],
+                'name' => ['value' => 'Sun Plaza'],
+                'city' => ['value' => 'Medan'],
+                'province' => ['value' => 'Sumatera Utara'],
+                'image' => ['value' => 'http://localhost:8000/images/malls/sun-plaza.png'],
+            ]]],
+        ], 200),
+    ]);
+
+    $this->get('/malls')
+        ->assertOk()
+        ->assertSee('Sun Plaza')
+        ->assertSee('src="'.asset('images/malls/sun-plaza.png').'"', false);
+});
+
 test('the shared navigation only includes home, team, and typo-tolerant store search', function () {
     Http::fake([
         '*' => Http::response(['results' => ['bindings' => []]], 200),
@@ -67,6 +91,16 @@ test('the shared navigation only includes home, team, and typo-tolerant store se
         ->assertSee('name="search"', false)
         ->assertDontSee('href="'.route('malls.index').'"', false)
         ->assertDontSee('href="'.route('planner.index').'"', false);
+});
+
+test('the team page has five editable profile and photo slots', function () {
+    $response = $this->get('/team')->assertOk();
+
+    expect(substr_count($response->getContent(), 'team-card__photo--empty'))->toBe(5)
+        ->and(substr_count($response->getContent(), 'team_member_placeholder'))->toBe(5);
+
+    $response->assertSee('SPARQL')
+        ->assertSee('public/images/team/member-01.jpg');
 });
 
 test('advanced search exposes category, hours, rating, price, and voice filters', function () {
@@ -176,8 +210,285 @@ test('store search normalizes leetspeak typos in mall names', function () {
         'LCASE("pla")',
     ) && str_contains(
         rawurldecode($request->url()),
-        'LIMIT 2000',
+        'LIMIT 5000',
     ));
+});
+
+test('store search ranks a store-name match above a mall-name match', function () {
+    Http::fake([
+        '*' => Http::response([
+            'results' => ['bindings' => [
+                [
+                    'store' => ['value' => 'store/mall-match'],
+                    'storeName' => ['value' => 'Coffee House'],
+                    'mallName' => ['value' => 'Sun Plaza'],
+                    'city' => ['value' => 'Medan'],
+                    'category' => ['value' => 'Cafe'],
+                    'rating' => ['value' => '4.9'],
+                ],
+                [
+                    'store' => ['value' => 'store/store-match'],
+                    'storeName' => ['value' => 'Sun Plaza Cafe'],
+                    'mallName' => ['value' => 'North Point'],
+                    'city' => ['value' => 'Medan'],
+                    'category' => ['value' => 'Cafe'],
+                    'rating' => ['value' => '4.1'],
+                ],
+            ]],
+        ], 200),
+    ]);
+
+    $this->get('/search/filter?search=Sun%20Plaza')
+        ->assertOk()
+        ->assertSeeInOrder(['Sun Plaza Cafe', 'Coffee House']);
+});
+
+test('mall and store entities both appear in semantic search results', function () {
+    Http::fake([
+        '*' => Http::response([
+            'results' => ['bindings' => [
+                [
+                    'resultType' => ['value' => 'store'],
+                    'store' => ['value' => 'store/cafe'],
+                    'mallId' => ['value' => ''],
+                    'storeName' => ['value' => 'Coffee House'],
+                    'mallName' => ['value' => 'Sun Plaza'],
+                    'city' => ['value' => 'Medan'],
+                    'category' => ['value' => 'Cafe'],
+                ],
+                [
+                    'resultType' => ['value' => 'mall'],
+                    'mallId' => ['value' => 'sun_plaza'],
+                    'storeName' => ['value' => 'Sun Plaza'],
+                    'mallName' => ['value' => 'Sun Plaza'],
+                    'city' => ['value' => 'Medan'],
+                    'province' => ['value' => 'Sumatera Utara'],
+                ],
+            ]],
+        ], 200),
+    ]);
+
+    $this->get('/search/filter?search=Sun%20Plaza')
+        ->assertOk()
+        ->assertSee('Mall yang cocok')
+        ->assertSee('Coffee House')
+        ->assertSee('href="'.route('malls.show', ['id' => 'sun_plaza']).'"', false);
+
+});
+
+test('fuzzy fallback also returns the matching mall entity', function () {
+    Cache::flush();
+    Http::fakeSequence()
+        ->push(['results' => ['bindings' => []]], 200)
+        ->push(['results' => ['bindings' => [[
+            'resultType' => ['value' => 'mall'],
+            'mallId' => ['value' => 'plaza_medan_fair'],
+            'storeName' => ['value' => 'Plaza Medan Fair'],
+            'mallName' => ['value' => 'Plaza Medan Fair'],
+            'city' => ['value' => 'Medan'],
+            'province' => ['value' => 'Sumatera Utara'],
+        ]]]], 200);
+
+    $this->get('/search/filter?search=Pluza%20Muden%20Pair')
+        ->assertOk()
+        ->assertSee('Plaza Medan Fair')
+        ->assertSee('href="'.route('malls.show', ['id' => 'plaza_medan_fair']).'"', false);
+});
+
+test('store search uses case-insensitive SPARQL regex matching', function () {
+    Http::fake([
+        '*' => Http::response(['results' => ['bindings' => []]], 200),
+    ]);
+
+    $this->get('/search/filter?search=Burger')->assertOk();
+
+    Http::assertSent(fn ($request): bool => str_contains(
+        rawurldecode($request->url()),
+        'REGEX(STR(?storeName), "burger", "i")',
+    ));
+});
+
+test('store existence uses a parameterized SPARQL ASK query and returns its boolean result', function () {
+    Http::fake([
+        '*' => Http::response(['head' => (object) [], 'boolean' => true], 200),
+    ]);
+
+    $this->postJson('/search/exists', ['name' => 'UNIQLO'])
+        ->assertOk()
+        ->assertJsonPath('exists', true);
+
+    Http::assertSent(fn ($request): bool => str_contains(
+        rawurldecode($request->url()),
+        'ASK {',
+    ) && str_contains(
+        rawurldecode($request->url()),
+        'schema:name "UNIQLO" .',
+    ));
+});
+
+test('store search returns relevant prefix matches for a single-character query', function () {
+    Http::fake([
+        '*' => Http::response([
+            'results' => ['bindings' => [
+                [
+                    'store' => ['value' => 'store/cafe'],
+                    'storeName' => ['value' => 'Cafe Example'],
+                    'mallName' => ['value' => 'Sun Plaza'],
+                    'city' => ['value' => 'Medan'],
+                    'category' => ['value' => 'Cafe'],
+                ],
+                [
+                    'store' => ['value' => 'store/books'],
+                    'storeName' => ['value' => 'Book Corner'],
+                    'mallName' => ['value' => 'Moon Plaza'],
+                    'city' => ['value' => 'Medan'],
+                    'category' => ['value' => 'Books'],
+                ],
+                [
+                    'store' => ['value' => 'store/address-only'],
+                    'storeName' => ['value' => 'Corner Books'],
+                    'mallName' => ['value' => 'Moon Plaza'],
+                    'city' => ['value' => 'Medan'],
+                    'category' => ['value' => 'Retail'],
+                    'address' => ['value' => 'South Avenue'],
+                ],
+            ]],
+        ], 200),
+    ]);
+
+    $this->get('/search/filter?search=s')
+        ->assertOk()
+        ->assertSee('Cafe Example')
+        ->assertDontSee('Book Corner')
+        ->assertDontSee('Corner Books');
+
+    Http::assertSent(fn ($request): bool => str_contains(
+        rawurldecode($request->url()),
+        'STRSTARTS(LCASE(STR(?mallName)), LCASE("s"))',
+    ));
+});
+
+test('a single-letter search matches names that start with that letter', function () {
+    Http::fake([
+        '*' => Http::response([
+            'results' => ['bindings' => [
+                [
+                    'store' => ['value' => 'store/alpha'],
+                    'storeName' => ['value' => 'Alpha Store'],
+                    'mallName' => ['value' => 'Central Plaza'],
+                    'city' => ['value' => 'Aceh'],
+                    'category' => ['value' => 'Retail'],
+                ],
+                [
+                    'store' => ['value' => 'store/inside-alpha-mall'],
+                    'storeName' => ['value' => 'Cafe Example'],
+                    'mallName' => ['value' => 'A Mall'],
+                    'city' => ['value' => 'Medan'],
+                    'category' => ['value' => 'Cafe'],
+                ],
+                [
+                    'store' => ['value' => 'store/ends-in-a'],
+                    'storeName' => ['value' => 'Cafe A'],
+                    'mallName' => ['value' => 'Central Plaza'],
+                    'city' => ['value' => 'Aceh'],
+                    'category' => ['value' => 'Cafe'],
+                ],
+            ]],
+        ], 200),
+    ]);
+
+    $this->get('/search/filter?search=A')
+        ->assertOk()
+        ->assertSee('Alpha Store')
+        ->assertSee('Cafe Example')
+        ->assertDontSee('Cafe A');
+
+    Http::assertSent(fn ($request): bool => str_contains(
+        rawurldecode($request->url()),
+        'STRSTARTS(LCASE(STR(?storeName)), LCASE("a"))',
+    ));
+});
+
+test('search ignores common words but preserves a query made only of ignored words', function () {
+    Http::fake([
+        '*' => Http::response(['results' => ['bindings' => []]], 200),
+    ]);
+
+    $this->get('/search/filter?search=Mall%20Plaza')->assertOk();
+
+    Http::assertSent(fn ($request): bool => str_contains(
+        rawurldecode($request->url()),
+        'LCASE("pla")',
+    ) && ! str_contains(
+        rawurldecode($request->url()),
+        'LCASE("mal")',
+    ));
+});
+
+test('typoed searches suggest the best matching mall name', function () {
+    Http::fake([
+        '*' => Http::response([
+            'results' => ['bindings' => [[
+                'store' => ['value' => 'store/coffee'],
+                'storeName' => ['value' => 'Coffee House'],
+                'mallName' => ['value' => 'Plaza Medan Fair'],
+                'city' => ['value' => 'Medan'],
+                'category' => ['value' => 'Cafe'],
+                'rating' => ['value' => '4.8'],
+            ]]],
+        ], 200),
+    ]);
+
+    $this->get('/search/filter?search=Pluza%20Muden%20Pair')
+        ->assertOk()
+        ->assertSee('Mungkin yang Anda maksud adalah')
+        ->assertSee('Plaza Medan Fair');
+});
+
+test('store search finds numeric identifiers and typoed city names', function () {
+    Http::fakeSequence()
+        ->push(['results' => ['bindings' => [
+            [
+                'store' => ['value' => 'store/twenty-four'],
+                'storeName' => ['value' => 'Store 24'],
+                'mallName' => ['value' => 'Central Plaza'],
+                'city' => ['value' => 'Medan'],
+                'category' => ['value' => 'Retail'],
+            ],
+            [
+                'store' => ['value' => 'store/forty-five'],
+                'storeName' => ['value' => 'Store 45'],
+                'mallName' => ['value' => 'Central Plaza'],
+                'city' => ['value' => 'Jakarta'],
+                'category' => ['value' => 'Retail'],
+            ],
+        ]]], 200)
+        ->push(['results' => ['bindings' => [
+            [
+                'store' => ['value' => 'store/medan'],
+                'storeName' => ['value' => 'Cafe Example'],
+                'mallName' => ['value' => 'Sun Plaza'],
+                'city' => ['value' => 'Medan'],
+                'category' => ['value' => 'Cafe'],
+            ],
+            [
+                'store' => ['value' => 'store/jakarta'],
+                'storeName' => ['value' => 'Book Corner'],
+                'mallName' => ['value' => 'Moon Plaza'],
+                'city' => ['value' => 'Jakarta'],
+                'category' => ['value' => 'Books'],
+            ],
+        ]]], 200);
+
+    $this->get('/search/filter?search=2')
+        ->assertOk()
+        ->assertSee('Store 24')
+        ->assertDontSee('Store 45');
+
+    $this->get('/search/filter?search=medn')
+        ->assertOk()
+        ->assertSee('Cafe Example')
+        ->assertDontSee('Book Corner');
 });
 
 test('store search applies opening, rating, price, and operational filters in Fuseki', function () {
@@ -220,7 +531,7 @@ test('the mall map lists address-based locations without requiring stored coordi
         ->assertOk()
         ->assertSee('Sun Plaza')
         ->assertSee('data-locate-mall', false)
-        ->assertSee('google.com/maps/search', false);
+        ->assertSee('openstreetmap.org/search', false);
 });
 
 test('mall details reject non-http website schemes from RDF', function () {
@@ -232,6 +543,7 @@ test('mall details reject non-http website schemes from RDF', function () {
                 'province' => ['value' => 'Sumatera Utara'],
                 'address' => ['value' => 'Jl. Zainul Arifin'],
                 'website' => ['value' => 'javascript:alert(1)'],
+                'image' => ['value' => 'https://cdn.example.test/cafe-logo.png'],
                 'storeName' => ['value' => 'Cafe Example'],
                 'category' => ['value' => 'Food & Beverage'],
             ]]],
@@ -242,6 +554,7 @@ test('mall details reject non-http website schemes from RDF', function () {
         ->assertOk()
         ->assertSee('mall-map', false)
         ->assertSee('Cafe Example')
+        ->assertSee('src="https://cdn.example.test/cafe-logo.png"', false)
         ->assertDontSee('javascript:');
 });
 
@@ -269,6 +582,44 @@ test('chat conversations can be stored after the explorer schema migration', fun
     expect(ChatLog::query()->count())->toBe(1);
 });
 
+test('the chatbot rejects questions outside the SumatraMall context without querying Fuseki', function () {
+    Http::fake();
+
+    $this->postJson('/chatbot', ['message' => 'Tell me a joke about outer space'])
+        ->assertOk()
+        ->assertJsonPath('reply', 'pertanyaan tidak dapat di proses karena diluar konteks')
+        ->assertJsonPath('intent.type', 'unknown');
+
+    Http::assertNothingSent();
+});
+
+test('the chatbot explains website features using live semantic graph counts', function () {
+    Http::fake([
+        '*' => Http::response([
+            'results' => ['bindings' => [[
+                'mallCount' => ['value' => '40'],
+                'storeCount' => ['value' => '120'],
+                'provinceCount' => ['value' => '10'],
+                'categoryCount' => ['value' => '8'],
+            ]]],
+        ], 200),
+    ]);
+
+    $this->postJson('/chatbot', ['message' => 'Fitur apa yang ada di website ini?'])
+        ->assertOk()
+        ->assertJsonPath('intent.type', 'site_info')
+        ->assertJsonPath('results_count', 1)
+        ->assertJsonPath('reply', 'SumatraMall membantu menjelajahi data mall dan toko melalui pencarian semantik. Fitur yang tersedia mencakup perbandingan mall, rekomendasi kategori, estimasi tingkat harga, filter buka sekarang, dan rute multi-stop dengan OpenStreetMap. Data graph saat ini: 40 mall, 120 toko, 10 provinsi, dan 8 kategori.');
+
+    Http::assertSent(fn ($request): bool => str_contains(
+        rawurldecode($request->url()),
+        'COUNT(DISTINCT ?mall)',
+    ) && str_contains(
+        rawurldecode($request->url()),
+        'COUNT(DISTINCT ?store)',
+    ));
+});
+
 test('the chatbot understands English store searches and responds in English', function () {
     Http::fake([
         '*' => Http::response([
@@ -288,13 +639,17 @@ test('the chatbot understands English store searches and responds in English', f
         ->assertJsonPath('reply', "I found 1 store:\n\n- Cafe Example at Sun Plaza (Medan)");
 });
 
-test('Gemini receives bounded RDF results and returns the configured assistant reply', function () {
-    config(['services.gemini.api_key' => 'test-gemini-key']);
+test('OpenAI-compatible chat receives bounded RDF results and returns the assistant reply', function () {
+    config([
+        'services.chat.api_key' => 'test-chat-key',
+        'services.chat.model' => 'test-model',
+        'services.chat.base_url' => 'https://chat.example/v1',
+    ]);
     Http::fake(function ($request) {
-        if (str_contains($request->url(), 'generateContent')) {
+        if (str_contains($request->url(), '/chat/completions')) {
             return Http::response([
-                'candidates' => [[
-                    'content' => ['parts' => [['text' => 'Cafe Example is in Sun Plaza, Medan.']]],
+                'choices' => [[
+                    'message' => ['content' => 'Cafe Example is in Sun Plaza, Medan.'],
                 ]],
             ], 200);
         }
@@ -317,10 +672,101 @@ test('Gemini receives bounded RDF results and returns the configured assistant r
         ->assertJsonPath('ai_enabled', true)
         ->assertJsonPath('notice', null);
 
-    Http::assertSent(fn ($request): bool => str_contains($request->url(), 'generateContent')
-        && $request->hasHeader('x-goog-api-key', 'test-gemini-key')
+    Http::assertSent(fn ($request): bool => str_contains($request->url(), '/chat/completions')
+        && $request->hasHeader('Authorization', 'Bearer test-chat-key')
+        && data_get($request->data(), 'model') === 'test-model'
         && str_contains($request->body(), 'Cafe Example')
         && str_contains($request->body(), 'English'));
+});
+
+test('NVIDIA chat endpoint URLs are not appended with a duplicate completions path', function () {
+    config([
+        'services.chat.api_key' => 'test-nvidia-key',
+        'services.chat.model' => 'mistralai/mistral-large-4-1t-a52b',
+        'services.chat.base_url' => 'https://integrate.api.nvidia.com/v1/chat/completions',
+    ]);
+    Http::fake(function ($request) {
+        if (str_contains($request->url(), '/chat/completions')) {
+            return Http::response(['choices' => [['message' => ['content' => 'Halo dari NVIDIA.']]]]);
+        }
+
+        return Http::response(['results' => ['bindings' => [[
+            'mallCount' => ['value' => '107'],
+            'storeCount' => ['value' => '2872'],
+            'provinceCount' => ['value' => '10'],
+            'categoryCount' => ['value' => '9'],
+        ]]]]);
+    });
+
+    $this->postJson('/chatbot', ['message' => 'Apa fitur website ini?'])
+        ->assertOk()
+        ->assertJsonPath('reply', 'Halo dari NVIDIA.')
+        ->assertJsonPath('ai_enabled', true);
+
+    Http::assertSent(fn ($request): bool => $request->url() === 'https://integrate.api.nvidia.com/v1/chat/completions'
+        && $request->hasHeader('Authorization', 'Bearer test-nvidia-key')
+        && data_get($request->data(), 'model') === 'mistralai/mistral-large-4-1t-a52b');
+});
+
+test('chat reports NVIDIA authentication and credit errors clearly', function () {
+    config([
+        'services.chat.api_key' => 'test-nvidia-key',
+        'services.chat.model' => 'mistralai/mistral-large-4-1t-a52b',
+        'services.chat.base_url' => 'https://integrate.api.nvidia.com/v1',
+    ]);
+    Http::fake(function ($request) {
+        if (str_contains($request->url(), '/chat/completions')) {
+            return Http::response(['detail' => 'Unauthorized'], 401);
+        }
+
+        return Http::response(['results' => ['bindings' => [[
+            'mallCount' => ['value' => '107'],
+            'storeCount' => ['value' => '2872'],
+            'provinceCount' => ['value' => '10'],
+            'categoryCount' => ['value' => '9'],
+        ]]]]);
+    });
+
+    $this->postJson('/chatbot', ['message' => 'Apa fitur website ini?'])
+        ->assertStatus(503)
+        ->assertJsonPath('message', 'API key NVIDIA tidak valid. Periksa NVIDIA_API_KEY di .env.');
+});
+
+test('AI chat keeps a short conversation history for follow-up mall questions', function () {
+    config([
+        'services.chat.api_key' => 'test-chat-key',
+        'services.chat.model' => 'test-model',
+        'services.chat.base_url' => 'https://chat.example/v1',
+    ]);
+    Http::fake(function ($request) {
+        if (str_contains($request->url(), '/chat/completions')) {
+            return Http::response([
+                'choices' => [['message' => ['content' => 'Here are the matching stores.']]],
+            ]);
+        }
+
+        return Http::response(['results' => ['bindings' => [[
+            'storeName' => ['value' => 'Cafe Example'],
+            'mallName' => ['value' => 'Sun Plaza'],
+            'city' => ['value' => 'Medan'],
+        ]]]]);
+    });
+
+    $sessionId = 'chat_history_test';
+    $this->postJson('/chatbot', [
+        'message' => 'find a cafe in Sun Plaza',
+        'session_id' => $sessionId,
+        'locale' => 'en',
+    ])->assertOk();
+    $this->postJson('/chatbot', [
+        'message' => 'find a store there',
+        'session_id' => $sessionId,
+        'locale' => 'en',
+    ])->assertOk();
+
+    Http::assertSent(fn ($request): bool => str_contains($request->url(), '/chat/completions')
+        && str_contains($request->body(), 'find a cafe in Sun Plaza')
+        && str_contains($request->body(), 'Here are the matching stores.'));
 });
 
 test('the chatbot filters mall listings by a recognized city', function () {
@@ -428,110 +874,30 @@ test('unusable OSRM data returns a clearly labeled local route estimate', functi
         ->and($route['totalDistance'])->toBeGreaterThan(0);
 });
 
-test('Google Maps plans routes from addresses and reports the visit order', function () {
-    config(['services.google_maps.server_key' => 'test-maps-key']);
-    Http::fake([
-        '*' => Http::response([
-            'routes' => [[
-                'distanceMeters' => 12000,
-                'duration' => '1200s',
-                'polyline' => ['encodedPolyline' => '_p~iF~ps|U_ulLnnqC'],
-                'legs' => [[
-                    'distanceMeters' => 12000,
-                    'duration' => '1200s',
-                    'startLocation' => ['latLng' => ['latitude' => 3.5, 'longitude' => 98.6]],
-                    'endLocation' => ['latLng' => ['latitude' => 3.6, 'longitude' => 98.7]],
-                ]],
-            ]],
-        ], 200),
-    ]);
-
-    $route = app(GoogleMapsService::class)->planRoute([
-        ['id' => 'mall_a', 'name' => 'Mall A', 'city' => 'Medan', 'province' => 'North Sumatra', 'address' => 'One Street'],
-        ['id' => 'mall_b', 'name' => 'Mall B', 'city' => 'Medan', 'province' => 'North Sumatra', 'address' => 'Two Street'],
-    ], null, null);
-
-    expect(array_column($route['malls'], 'id'))->toBe(['mall_a', 'mall_b'])
-        ->and($route['legs'][0]['end_address'])->toBe('Mall B')
-        ->and($route['source'])->toBe('google_maps')
-        ->and(count($route['routeCoordinates']))->toBe(2);
-
-    Http::assertSent(fn ($request): bool => $request->hasHeader('X-Goog-Api-Key', 'test-maps-key')
-        && str_contains($request->body(), '"address":"One Street"')
-        && str_contains($request->body(), '"address":"Two Street"'));
-});
-
-test('Google Maps uses the optimized intermediate mall order', function () {
-    config(['services.google_maps.server_key' => 'test-maps-key']);
-    Http::fake([
-        '*' => Http::response([
-            'routes' => [[
-                'distanceMeters' => 24000,
-                'duration' => '2400s',
-                'polyline' => ['encodedPolyline' => '_p~iF~ps|U_ulLnnqC'],
-                'optimizedIntermediateWaypointIndex' => [1, 0, 2],
-                'legs' => array_fill(0, 4, [
-                    'distanceMeters' => 8000,
-                    'duration' => '800s',
-                    'startLocation' => ['latLng' => ['latitude' => 3.5, 'longitude' => 98.6]],
-                    'endLocation' => ['latLng' => ['latitude' => 3.6, 'longitude' => 98.7]],
-                ]),
-            ]],
-        ], 200),
-    ]);
-
-    $route = app(GoogleMapsService::class)->planRoute([
-        ['id' => 'mall_a', 'name' => 'Mall A', 'city' => 'Medan'],
-        ['id' => 'mall_b', 'name' => 'Mall B', 'city' => 'Medan'],
-        ['id' => 'mall_c', 'name' => 'Mall C', 'city' => 'Medan'],
-        ['id' => 'mall_d', 'name' => 'Mall D', 'city' => 'Medan'],
-    ], 3.5, 98.6);
-
-    expect(array_column($route['malls'], 'id'))->toBe(['mall_b', 'mall_a', 'mall_c', 'mall_d'])
-        ->and(count($route['legs']))->toBe(4);
-
-    Http::assertSent(fn ($request): bool => str_contains($request->body(), '"optimizeWaypointOrder":true'));
-});
-
-test('Google Maps rejects a route that omits its optimized waypoint order', function () {
-    config(['services.google_maps.server_key' => 'test-maps-key']);
-    Http::fake([
-        '*' => Http::response([
-            'routes' => [[
-                'distanceMeters' => 32000,
-                'duration' => '3200s',
-                'polyline' => ['encodedPolyline' => '_p~iF~ps|U_ulLnnqC'],
-                'legs' => array_fill(0, 4, [
-                    'distanceMeters' => 8000,
-                    'duration' => '800s',
-                ]),
-            ]],
-        ], 200),
-    ]);
-
-    expect(fn () => app(GoogleMapsService::class)->planRoute([
-        ['id' => 'mall_a', 'name' => 'Mall A', 'city' => 'Medan'],
-        ['id' => 'mall_b', 'name' => 'Mall B', 'city' => 'Medan'],
-        ['id' => 'mall_c', 'name' => 'Mall C', 'city' => 'Medan'],
-        ['id' => 'mall_d', 'name' => 'Mall D', 'city' => 'Medan'],
-    ], 3.5, 98.6))->toThrow(RuntimeException::class, 'omitted the optimized waypoint order');
-});
-
-test('route planning resolves selected mall addresses and renders the Google route', function () {
-    config(['services.google_maps.server_key' => 'test-maps-key']);
+test('route planning renders an OpenStreetMap route from RDF coordinates', function () {
     Http::fake(function ($request) {
-        if (str_contains($request->url(), 'computeRoutes')) {
+        if (str_contains($request->url(), '/table/')) {
             return Http::response([
+                'code' => 'Ok',
+                'durations' => [
+                    [0, 100, 200],
+                    [100, 0, 100],
+                    [200, 100, 0],
+                ],
+            ], 200);
+        }
+
+        if (str_contains($request->url(), '/route/')) {
+            return Http::response([
+                'code' => 'Ok',
                 'routes' => [[
-                    'distanceMeters' => 12000,
-                    'duration' => '1200s',
-                    'polyline' => ['encodedPolyline' => '_p~iF~ps|U_ulLnnqC'],
-                    'legs' => [[
-                        'distanceMeters' => 12000,
-                        'duration' => '1200s',
-                        'startLocation' => ['latLng' => ['latitude' => 3.5, 'longitude' => 98.6]],
-                        'endLocation' => ['latLng' => ['latitude' => 3.6, 'longitude' => 98.7]],
-                    ]],
+                    'distance' => 12000,
+                    'duration' => 1200,
+                    'legs' => [
+                        ['distance' => 6000, 'duration' => 600],
+                        ['distance' => 6000, 'duration' => 600],
+                    ],
+                    'geometry' => ['coordinates' => [[98.5, 3.4], [98.6, 3.5], [98.7, 3.6]]],
                 ]],
             ], 200);
         }
@@ -544,6 +910,8 @@ test('route planning resolves selected mall addresses and renders the Google rou
                     'city' => ['value' => 'Medan'],
                     'province' => ['value' => 'Sumatera Utara'],
                     'address' => ['value' => 'One Street'],
+                    'lat' => ['value' => '3.5'],
+                    'lng' => ['value' => '98.6'],
                 ],
                 [
                     'id' => ['value' => 'mall_b'],
@@ -551,6 +919,8 @@ test('route planning resolves selected mall addresses and renders the Google rou
                     'city' => ['value' => 'Medan'],
                     'province' => ['value' => 'Sumatera Utara'],
                     'address' => ['value' => 'Two Street'],
+                    'lat' => ['value' => '3.6'],
+                    'lng' => ['value' => '98.7'],
                 ],
             ]],
         ], 200);
@@ -558,12 +928,93 @@ test('route planning resolves selected mall addresses and renders the Google rou
 
     $this->post('/planner/calculate', [
         'mall_ids' => ['mall_a', 'mall_b'],
+        'start_lat' => '3.4',
+        'start_lng' => '98.5',
         'locale' => 'en',
     ])->assertOk()
-        ->assertSee('Google Maps Routes API')
+        ->assertSee('OpenStreetMap / OSRM')
         ->assertSee('Mall A')
         ->assertSee('Mall B')
-        ->assertSee('google-directions-link', false);
+        ->assertSee('osm-directions-link', false)
+        ->assertSee('route-navigation-toggle', false)
+        ->assertSee('watchPosition', false);
+
+    Http::assertSent(fn ($request): bool => str_contains(
+        $request->url(),
+        '/route/v1/driving/98.5,3.4;',
+    ));
+});
+
+test('route planning refuses selected malls without RDF coordinates', function () {
+    Http::fake([
+        '*' => Http::response([
+            'results' => ['bindings' => [
+                [
+                    'id' => ['value' => 'mall_a'],
+                    'name' => ['value' => 'Mall A'],
+                    'city' => ['value' => 'Medan'],
+                    'province' => ['value' => 'Sumatera Utara'],
+                ],
+                [
+                    'id' => ['value' => 'mall_b'],
+                    'name' => ['value' => 'Mall B'],
+                    'city' => ['value' => 'Medan'],
+                    'province' => ['value' => 'Sumatera Utara'],
+                ],
+            ]],
+        ]),
+    ]);
+
+    $this->from('/planner')->post('/planner/calculate', [
+        'mall_ids' => ['mall_a', 'mall_b'],
+    ])->assertRedirect('/planner')->assertSessionHasErrors('mall_ids');
+
+    Http::assertNotSent(fn ($request): bool => str_contains($request->url(), '/route/'));
+});
+
+test('mall geocoding uses Nominatim and caches coordinates', function () {
+    $cacheKey = 'osm_geocode_'.md5('sun plaza, medan|');
+    Cache::forget($cacheKey);
+    Http::fake([
+        '*' => Http::response([['lat' => '3.5952', 'lon' => '98.6722']], 200),
+    ]);
+
+    $this->getJson('/map/geocode?query='.urlencode('Sun Plaza, Medan'))
+        ->assertOk()
+        ->assertExactJson(['lat' => 3.5952, 'lng' => 98.6722]);
+    $this->getJson('/map/geocode?query='.urlencode('Sun Plaza, Medan'))->assertOk();
+
+    Http::assertSentCount(1);
+    Http::assertSent(fn ($request): bool => str_contains($request->url(), 'nominatim.openstreetmap.org/search')
+        && $request->hasHeader('User-Agent')
+        && data_get($request->data(), 'countrycodes') === 'id');
+});
+
+test('mall geocoding retries with the clean mall name when the full address has no match', function () {
+    $cacheKey = 'osm_geocode_'.md5('sun plaza, medan|Jl. Teuku Umar, Medan');
+    Cache::forget($cacheKey);
+    Http::fakeSequence()
+        ->push([], 200)
+        ->push([['lat' => '3.5822609', 'lon' => '98.6719101']], 200);
+
+    $this->getJson('/map/geocode?'.http_build_query([
+        'query' => 'Sun Plaza, Medan',
+        'fallback' => 'Jl. Teuku Umar, Medan',
+    ]))->assertOk()
+        ->assertExactJson(['lat' => 3.5822609, 'lng' => 98.6719101]);
+
+    Http::assertSentCount(2);
+});
+
+test('geocoding explains how to fix Nominatim access denied errors', function () {
+    Cache::forget('osm_geocode_'.md5('test mall|'));
+    Http::fake(['*' => Http::response('Forbidden', 403)]);
+
+    $response = $this->getJson('/map/geocode?query=test%20mall')->assertStatus(503);
+
+    expect($response->json('message'))
+        ->toContain('OSM_USER_AGENT')
+        ->toContain('valid contact email');
 });
 
 test('nearby amenities are returned from OpenStreetMap with mapped labels', function () {

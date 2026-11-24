@@ -6,7 +6,7 @@
 <div class="max-w-7xl mx-auto px-6">
     <div class="mb-8">
         <h1 data-i18n="page_map_title" class="font-display text-5xl font-bold mb-3">Peta Mall</h1>
-        <p data-i18n="page_map_description" class="text-gray-400">Lokasi mall dari graph RDF, ditampilkan di Google Maps.</p>
+        <p data-i18n="page_map_description" class="text-gray-400">Lokasi mall dari graph RDF, ditampilkan di OpenStreetMap.</p>
     </div>
 
     <div class="glass rounded-3xl p-4 mb-8">
@@ -43,8 +43,8 @@
                     <span data-i18n="maps_locate">Tampilkan di peta</span>
                 </button>
                 <a class="block text-xs text-gray-400 mt-1 hover:underline"
-                   href="https://www.google.com/maps/search/?api=1&amp;query={{ urlencode(($mall['address'] ?? $mall['name']).', '.$mall['city'].', '.$mall['province'].', Indonesia') }}"
-                   target="_blank" rel="noopener noreferrer" data-i18n="maps_open">Buka di Google Maps</a>
+                   href="https://www.openstreetmap.org/search?query={{ urlencode(($mall['address'] ?? $mall['name']).', '.$mall['city'].', '.$mall['province'].', Indonesia') }}"
+                   target="_blank" rel="noopener noreferrer" data-i18n="maps_open">Buka di OpenStreetMap</a>
             </article>
             @endforeach
         </div>
@@ -57,8 +57,52 @@
 const mallMapElement = document.getElementById('map');
 const mapStatus = document.getElementById('map-status');
 let mallMap;
+let L;
 const mallMarkers = new Map();
+
+function markerIcon() {
+    const L = window.sumateraLeaflet;
+    return L.divIcon({ className: 'mall-map-marker', html: '<span></span>', iconSize: [24, 24], iconAnchor: [12, 12] });
+}
+
+function popupContent(text) {
+    const element = document.createElement('span');
+    element.textContent = text;
+    return element;
+}
+
+async function resolveMallPosition(button) {
+    const latitude = Number(button.dataset.lat);
+    const longitude = Number(button.dataset.lng);
+    if (Number.isFinite(latitude) && Number.isFinite(longitude) && button.dataset.lat !== '' && button.dataset.lng !== '') {
+        return [latitude, longitude];
+    }
+
+    const query = `${button.dataset.name}, ${button.dataset.city}, ${button.dataset.province}, Indonesia`;
+    const params = new URLSearchParams({ query });
+    if (button.dataset.address) params.set('fallback', `${button.dataset.address}, ${button.dataset.city}, ${button.dataset.province}, Indonesia`);
+    const response = await fetch(`{{ route('map.geocode') }}?${params}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.message || window.sumateraTranslate('maps_location_failed'));
+    return [Number(data.lat), Number(data.lng)];
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+    L = window.sumateraLeaflet;
+    mallMap = L.map(mallMapElement).setView([0.5, 101], 5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(mallMap);
+    document.querySelectorAll('[data-locate-mall]').forEach(button => {
+        if (button.dataset.lat === '' || button.dataset.lng === '') return;
+        const key = `${button.dataset.name}|${button.dataset.city}`;
+        const marker = L.marker([Number(button.dataset.lat), Number(button.dataset.lng)], { icon: markerIcon() })
+            .bindPopup(popupContent(`${button.dataset.name} — ${button.dataset.city}`))
+            .addTo(mallMap);
+        mallMarkers.set(key, marker);
+    });
+
     let province = '';
     let city = '';
     const normalize = value => value.trim().toLocaleLowerCase('id');
@@ -98,14 +142,6 @@ const showMapError = error => {
     mapStatus.textContent = error.message || window.sumateraTranslate('maps_load_failed');
 };
 
-async function ensureMallMap() {
-    if (mallMap) return mallMap;
-    const maps = await window.loadGoogleMaps();
-    await maps.importLibrary('maps');
-    mallMap = new maps.Map(mallMapElement, { center: { lat: 0.5, lng: 101 }, zoom: 5 });
-    return mallMap;
-}
-
 document.querySelectorAll('[data-locate-mall]').forEach(button => {
     button.addEventListener('click', async () => {
         const label = button.querySelector('[data-i18n]');
@@ -114,32 +150,17 @@ document.querySelectorAll('[data-locate-mall]').forEach(button => {
         button.disabled = true;
         mapStatus.textContent = '';
         try {
-            const map = await ensureMallMap();
-            let position;
-            const latitude = Number(button.dataset.lat);
-            const longitude = Number(button.dataset.lng);
-            if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
-                position = { lat: latitude, lng: longitude };
-            } else {
-                const address = button.dataset.address
-                    || `${button.dataset.name}, ${button.dataset.city}, ${button.dataset.province}, Indonesia`;
-                    const { results } = await new google.maps.Geocoder().geocode({ address, region: 'ID' });
-                if (!results?.length) throw new Error(window.sumateraTranslate('maps_location_failed'));
-                position = results[0].geometry.location;
-            }
-
-            map.setCenter(position);
-            map.setZoom(15);
+            const position = await resolveMallPosition(button);
             const key = `${button.dataset.name}|${button.dataset.city}`;
             if (!mallMarkers.has(key)) {
-                mallMarkers.set(key, new google.maps.Marker({
-                    map,
-                    position,
-                    title: `${button.dataset.name} — ${button.dataset.city}`
-                }));
+                mallMarkers.set(key, L.marker(position, { icon: markerIcon() })
+                    .bindPopup(popupContent(`${button.dataset.name} — ${button.dataset.city}`))
+                    .addTo(mallMap));
             } else {
-                mallMarkers.get(key).setPosition(position);
+                mallMarkers.get(key).setLatLng(position);
             }
+            mallMap.setView(position, 15);
+            mallMarkers.get(key).openPopup();
         } catch (error) {
             showMapError(error);
         } finally {
@@ -152,8 +173,8 @@ document.querySelectorAll('[data-locate-mall]').forEach(button => {
 document.addEventListener('DOMContentLoaded', () => {
     if (!@js(count($malls) > 0)) {
         mapStatus.textContent = window.sumateraTranslate('map_empty');
-    } else if (!window.sumateraGoogleMapsKey) {
-        mapStatus.textContent = window.sumateraTranslate('maps_key_missing');
+    } else if (mallMarkers.size === 0) {
+        mapStatus.textContent = window.sumateraTranslate('map_coordinates_unavailable');
     }
 });
 </script>

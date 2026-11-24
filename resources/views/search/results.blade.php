@@ -6,16 +6,21 @@
 <div class="max-w-7xl mx-auto px-6">
     <div class="mb-8">
         <h1 data-i18n="search_results_title" class="font-display text-4xl font-bold mb-2">Hasil Pencarian</h1>
-        <p class="text-gray-400"><span data-i18n="search_results_found">Ditemukan</span> <strong class="text-neon-cyan">{{ count($results) }}</strong> <span data-i18n="search_results_count">hasil</span></p>
+        <p class="text-gray-400"><span data-i18n="search_results_found">Ditemukan</span> <strong class="text-neon-cyan">{{ $count }}</strong> <span data-i18n="search_results_count">hasil</span></p>
         @if($searchTerm !== '')
         <p class="text-sm text-gray-400 mt-2"><span data-i18n="search_results_for">Hasil untuk</span> <strong class="text-neon-gold">“{{ $searchTerm }}”</strong> <span data-i18n="fuzzy_search_note">— typo-friendly matching</span></p>
+        @endif
+        @if($suggestedSearch)
+        <p class="text-sm text-gray-400 mt-2">
+            <span data-i18n="search_did_you_mean">Mungkin yang Anda maksud adalah</span>
+            <a class="text-neon-gold hover:underline" href="{{ route('search.filter', ['search' => $suggestedSearch]) }}">{{ $suggestedSearch }}</a>
+        </p>
         @endif
     </div>
 
     @if(count($results) > 0)
     <div class="glass rounded-2xl p-5 mb-8">
-        <p class="text-sm text-gray-400 mb-3" data-i18n="refine_results">Refine these results</p>
-        <div class="bubble-filter-row mb-3" role="group" aria-label="Filter results by category">
+        <div class="bubble-filter-row mb-3" role="group" aria-label="Category filters">
             <button type="button" class="bubble-filter bubble-filter--active" data-result-category="" aria-pressed="true" data-i18n="filter_all">All categories</button>
             @foreach(collect($results)->pluck('category')->filter()->unique()->sort() as $category)
             <button type="button" class="bubble-filter" data-result-category="{{ $category }}" aria-pressed="false">{{ $category }}</button>
@@ -23,7 +28,7 @@
             <button type="button" class="bubble-filter" data-result-open aria-pressed="{{ request('open_now') ? 'true' : 'false' }}"
                     @class(['bubble-filter--active' => request('open_now')]) data-i18n="field_open_now">Open now</button>
         </div>
-        <div class="bubble-filter-row" role="group" aria-label="Additional result filters">
+        <div class="bubble-filter-row" role="group" aria-label="Search filters">
             <button type="button" class="bubble-filter bubble-filter--active" data-result-city="" aria-pressed="true" data-i18n="all_cities">All cities</button>
             @foreach(collect($results)->pluck('city')->filter()->unique()->sort() as $city)
             <button type="button" class="bubble-filter" data-result-city="{{ $city }}" aria-pressed="false">{{ $city }}</button>
@@ -34,9 +39,12 @@
                     data-i18n="filter_operational">Operational</button>
             @foreach(collect($results)->pluck('priceLevel')->filter()->unique()->sort() as $priceLevel)
             <button type="button" class="bubble-filter" data-result-price="{{ $priceLevel }}" aria-pressed="false">
-                <span data-i18n="field_price_level">Price level</span> <span>{{ $priceLevel }} / 4</span>
+                <span data-i18n="field_price_level">Maximum price level</span>
+                <span aria-hidden="true">≤ {{ $priceLevel }} / 4</span>
             </button>
             @endforeach
+            <a href="{{ route('search.filter', ['search' => $searchTerm]) }}"
+               class="bubble-filter" data-i18n="reset_button">Reset filters</a>
         </div>
     </div>
     <form id="results-open-filter" action="{{ route('search.filter') }}" method="GET" class="sr-only" aria-hidden="true">
@@ -49,7 +57,31 @@
         <input type="hidden" name="open_now" value="1">
     </form>
     @endif
-    <p class="text-xs text-gray-500 mb-4"><span data-i18n="showing">Showing</span> <strong id="filtered-result-count">{{ count($results) }}</strong> <span data-i18n="search_results_count">results</span></p>
+    <p class="text-xs text-gray-500 mb-4"><span data-i18n="showing">Showing</span> <strong id="filtered-result-count">{{ $count }}</strong> <span data-i18n="search_results_count">results</span></p>
+
+    @if(count($mallResults) > 0)
+    <section class="mb-8" aria-labelledby="matching-malls-title">
+        <h2 id="matching-malls-title" class="font-display text-2xl font-bold mb-4" data-i18n="search_matching_malls">Mall yang cocok</h2>
+        <div class="grid md:grid-cols-3 gap-6">
+            @foreach($mallResults as $mall)
+            <article class="glass rounded-2xl p-5 hover:border-neon-cyan/50 transition-all">
+                <a href="{{ route('malls.show', ['id' => $mall['mallId']]) }}" class="block">
+                    @if(!empty($mall['image']))
+                    <img src="{{ $mall['image'] }}" alt="{{ $mall['mallName'] }}" class="w-full h-36 rounded-xl bg-white object-cover mb-4" loading="lazy" decoding="async">
+                    @endif
+                    <span class="bubble-filter bubble-filter--active mb-3" data-i18n="search_mall_label">Mall</span>
+                    <h3 class="font-display font-bold text-lg mt-3">{{ $mall['mallName'] }}</h3>
+                    <p class="text-sm text-gray-400">{{ $mall['city'] }}@if(!empty($mall['province'])), {{ $mall['province'] }}@endif</p>
+                    @if(!empty($mall['address']))
+                    <p class="text-xs text-gray-500 mt-2">{{ $mall['address'] }}</p>
+                    @endif
+                    <span class="inline-block text-sm text-neon-gold mt-4" data-i18n="search_mall_open">Lihat detail mall</span>
+                </a>
+            </article>
+            @endforeach
+        </div>
+    </section>
+    @endif
 
     <div class="grid md:grid-cols-3 gap-6" id="search-results-grid">
         @forelse($results as $r)
@@ -58,9 +90,14 @@
              data-rating="{{ $r['rating'] ?? '' }}" data-status="{{ $r['status'] ?? '' }}"
              data-price-level="{{ $r['priceLevel'] ?? '' }}">
             <div class="flex justify-between items-start mb-4">
-                <div>
+                <div class="flex items-start gap-3">
+                    @if(!empty($r['image']))
+                    <img src="{{ $r['image'] }}" alt="{{ $r['storeName'] }} logo" class="w-14 h-14 rounded-lg bg-white object-contain p-1" loading="lazy" decoding="async">
+                    @endif
+                    <div>
                     <h3 class="font-display font-bold text-lg mb-1">{{ $r['storeName'] }}</h3>
                     <p class="text-sm text-gray-400">{{ $r['mallName'] }}</p>
+                    </div>
                 </div>
                 @if(!empty($r['rating']))
                 <div class="flex items-center gap-1">
@@ -85,9 +122,11 @@
             @endif
         </div>
         @empty
+        @if(count($mallResults) === 0)
         <div class="col-span-3 glass rounded-2xl p-12 text-center">
             <p data-i18n="search_no_results" class="text-gray-400">Tidak ada hasil. Coba filter lain.</p>
         </div>
+        @endif
         @endforelse
     </div>
 </div>
@@ -101,6 +140,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let minimumRating = 0;
     let maximumPriceLevel = '';
     const cards = Array.from(document.querySelectorAll('[data-result-card]'));
+    const mallResultCount = document.querySelectorAll('#matching-malls-title + div article').length;
     const chips = document.querySelectorAll('[data-result-category], [data-result-city], [data-result-rated], [data-result-price]');
     const normalize = value => value.trim().toLocaleLowerCase('id');
 
@@ -114,7 +154,7 @@ document.addEventListener('DOMContentLoaded', () => {
             card.hidden = !matches;
             if (matches) visible++;
         });
-        document.getElementById('filtered-result-count').textContent = String(visible);
+        document.getElementById('filtered-result-count').textContent = String(visible + mallResultCount);
     }
 
     chips.forEach(chip => chip.addEventListener('click', () => {

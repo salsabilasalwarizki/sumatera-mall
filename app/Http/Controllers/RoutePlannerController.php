@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Services\GoogleMapsService;
+use App\Services\OsmService;
 use App\Services\SparqlService;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Client\ConnectionException;
@@ -20,7 +20,7 @@ class RoutePlannerController extends Controller
 {
     public function __construct(
         private readonly SparqlService $sparql,
-        private readonly GoogleMapsService $googleMaps,
+        private readonly OsmService $osm,
     ) {}
 
     public function index(): View
@@ -76,24 +76,34 @@ SPARQL);
                 'mall_ids' => 'Some selected malls are missing from the RDF graph. Refresh the imported mall data and try again.',
             ]);
         }
+        $mallsById = array_column($malls, null, 'id');
+        $malls = array_map(fn (string $id): array => $mallsById[$id], $validated['mall_ids']);
+        foreach ($malls as $mall) {
+            if (! is_numeric($mall['lat'] ?? null) || ! is_numeric($mall['lng'] ?? null)) {
+                throw ValidationException::withMessages([
+                    'mall_ids' => ($validated['locale'] ?? 'id') === 'en'
+                        ? 'Some selected malls are missing coordinates. Add latitude and longitude to the RDF data, then try again.'
+                        : 'Beberapa mall yang dipilih belum memiliki koordinat. Tambahkan latitude dan longitude ke data RDF, lalu coba lagi.',
+                ]);
+            }
+        }
 
         try {
-            $route = $this->googleMaps->planRoute(
+            $route = $this->osm->planRoute(
                 $malls,
                 isset($validated['start_lat']) ? (float) $validated['start_lat'] : null,
                 isset($validated['start_lng']) ? (float) $validated['start_lng'] : null,
-                $validated['locale'] ?? 'id',
             );
         } catch (ConnectionException|RequestException|RuntimeException $exception) {
-            Log::warning('Google Maps route calculation failed.', [
+            Log::warning('OpenStreetMap route calculation failed.', [
                 'message' => $exception->getMessage(),
             ]);
 
             return redirect()->route('planner.index')
                 ->withInput()
                 ->with('error', ($validated['locale'] ?? 'id') === 'en'
-                    ? 'Google Maps routing is unavailable. Check the Routes API key, API access, and billing, then try again.'
-                    : 'Layanan rute Google Maps tidak tersedia. Periksa API key, akses Routes API, dan billing, lalu coba lagi.');
+                    ? 'Road routing is unavailable right now. Please try again later.'
+                    : 'Layanan rute jalan sedang tidak tersedia. Silakan coba lagi nanti.');
         }
         $itinerary = [
             ...$route,

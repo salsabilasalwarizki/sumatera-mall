@@ -11,6 +11,42 @@ use RuntimeException;
 class OsmService
 {
     /**
+     * @return array{lat: float, lng: float}
+     *
+     * @throws ConnectionException
+     * @throws RequestException
+     */
+    public function geocodeAddress(string $address, ?string $fallbackQuery = null): array
+    {
+        $queries = array_values(array_unique(array_filter([
+            trim($address),
+            trim((string) $fallbackQuery),
+        ])));
+
+        foreach ($queries as $query) {
+            $data = Http::timeout(10)
+                ->withUserAgent((string) config('services.osm.user_agent'))
+                ->get((string) config('services.osm.geocoding_url'), [
+                    'q' => $query,
+                    'format' => 'jsonv2',
+                    'limit' => 1,
+                    'countrycodes' => 'id',
+                ])
+                ->throw()
+                ->json();
+
+            $result = is_array($data) ? ($data[0] ?? null) : null;
+            if (is_array($result)
+                && is_numeric($result['lat'] ?? null)
+                && is_numeric($result['lon'] ?? null)) {
+                return ['lat' => (float) $result['lat'], 'lng' => (float) $result['lon']];
+            }
+        }
+
+        throw new RuntimeException('OpenStreetMap could not find this mall location.');
+    }
+
+    /**
      * @param  array<int, array{id: string, name: string, city: string, lat: string|float, lng: string|float}>  $stops
      * @return array<string, mixed>
      */

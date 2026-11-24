@@ -9,6 +9,9 @@
 <div class="max-w-6xl mx-auto px-6" typeof="schema:ShoppingCenter"
      resource="http://sumateramall.org/resource/Mall/{{ $id }}">
     <div class="glass rounded-3xl p-8 mb-8">
+        @if(!empty($mall['image']))
+        <img src="{{ $mall['image'] }}" alt="{{ $mall['name'] }}" class="w-full max-h-80 rounded-2xl object-cover mb-6" fetchpriority="high">
+        @endif
         <h1 property="schema:name" class="font-display text-5xl font-bold mb-3">{{ $mall['name'] }}</h1>
         <div class="flex gap-3 mb-5">
             <span class="glass px-4 py-1 rounded-full text-sm">{{ $mall['city'] }}</span>
@@ -28,8 +31,8 @@
         <div id="mall-map" class="rounded-2xl" style="height: 400px;"></div>
         <p id="mall-map-status" class="text-sm text-gray-400 mt-3" role="status" aria-live="polite"></p>
         <a class="inline-block text-sm text-neon-cyan mt-3 hover:underline"
-           href="https://www.google.com/maps/search/?api=1&amp;query={{ urlencode(($mall['address'] ?? $mall['name']).', '.$mall['city'].', '.$mall['province'].', Indonesia') }}"
-           target="_blank" rel="noopener noreferrer" data-i18n="maps_open">Buka di Google Maps</a>
+           href="https://www.openstreetmap.org/search?query={{ urlencode(($mall['address'] ?? $mall['name']).', '.$mall['city'].', '.$mall['province'].', Indonesia') }}"
+           target="_blank" rel="noopener noreferrer" data-i18n="maps_open">Buka di OpenStreetMap</a>
         <button data-i18n="nearby_button" type="button" id="load-nearby" class="glass mt-4 px-5 py-3 rounded-xl hover:border-neon-cyan/50">
             Cari masjid, ATM, dan toilet di sekitar
         </button>
@@ -104,9 +107,14 @@
                      data-category="{{ $store['category'] }}" data-rating="{{ $store['rating'] ?? '' }}"
                      data-price-level="{{ $store['priceLevel'] ?? '' }}" typeof="schema:Store">
                 <div class="flex justify-between items-start mb-3">
-                    <div>
+                    <div class="flex items-start gap-3">
+                        @if(!empty($store['image']))
+                        <img src="{{ $store['image'] }}" alt="{{ $store['storeName'] }} logo" class="w-14 h-14 rounded-lg bg-white object-contain p-1" loading="lazy" decoding="async">
+                        @endif
+                        <div>
                         <h3 class="font-display font-bold text-lg" property="schema:name">{{ $store['storeName'] }}</h3>
                         <p class="text-sm text-gray-400">{{ $store['category'] }}</p>
+                        </div>
                     </div>
                     @if(!empty($store['rating']))
                     <span class="text-sm font-semibold">★ {{ $store['rating'] }}</span>
@@ -185,33 +193,42 @@ const mapElement = document.getElementById('mall-map');
 const mapStatus = document.getElementById('mall-map-status');
 const initialLat = {{ Illuminate\Support\Js::from($mall['lat'] ?? '') }};
 const initialLng = {{ Illuminate\Support\Js::from($mall['lng'] ?? '') }};
-const mallAddress = {{ Illuminate\Support\Js::from(($mall['address'] ?? $mall['name']).', '.$mall['city'].', '.$mall['province'].', Indonesia') }};
+const mallSearchQuery = {{ Illuminate\Support\Js::from($mall['name'].', '.$mall['city'].', '.$mall['province'].', Indonesia') }};
+const mallAddressFallback = {{ Illuminate\Support\Js::from(!empty($mall['address']) ? $mall['address'].', '.$mall['city'].', '.$mall['province'].', Indonesia' : '') }};
 const mallName = {{ Illuminate\Support\Js::from($mall['name']) }};
 let mallMap;
 let mallPosition = initialLat !== '' && initialLng !== ''
-    ? { lat: Number(initialLat), lng: Number(initialLng) }
+    ? [Number(initialLat), Number(initialLng)]
     : null;
 
 async function getMallPosition() {
     if (mallPosition) return mallPosition;
-    const maps = await window.loadGoogleMaps();
-    const { results } = await new google.maps.Geocoder().geocode({ address: mallAddress, region: 'ID' });
-    if (!results?.length) throw new Error(window.sumateraTranslate('maps_location_failed'));
-    mallPosition = results[0].geometry.location;
+    mapStatus.textContent = window.sumateraTranslate('map_missing_coordinates');
+    const params = new URLSearchParams({ query: mallSearchQuery });
+    if (mallAddressFallback.trim()) params.set('fallback', mallAddressFallback);
+    const response = await fetch(`{{ route('map.geocode') }}?${params}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.message || window.sumateraTranslate('maps_location_failed'));
+    mallPosition = [Number(data.lat), Number(data.lng)];
     return mallPosition;
 }
 
 async function initializeMallMap() {
-    if (!window.sumateraGoogleMapsKey) {
-        mapStatus.textContent = window.sumateraTranslate('maps_key_missing');
-        return;
-    }
     try {
-        const maps = await window.loadGoogleMaps();
-        await maps.importLibrary('maps');
+        const L = window.sumateraLeaflet;
+        mallMap = L.map(mapElement).setView([0.5, 101], 5);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(mallMap);
         const position = await getMallPosition();
-        mallMap = new maps.Map(mapElement, { center: position, zoom: 16 });
-        new google.maps.Marker({ map: mallMap, position, title: mallName });
+        mallMap.setView(position, 16);
+        const popup = document.createElement('span');
+        popup.textContent = mallName;
+        L.marker(position, { icon: L.divIcon({ className: 'mall-map-marker', html: '<span></span>', iconSize: [24, 24], iconAnchor: [12, 12] }) })
+            .bindPopup(popup)
+            .addTo(mallMap);
+        mapStatus.textContent = '';
     } catch (error) {
         mapStatus.textContent = error.message || window.sumateraTranslate('maps_load_failed');
     }
@@ -226,9 +243,7 @@ document.getElementById('load-nearby').addEventListener('click', async event => 
     status.textContent = window.sumateraTranslate('nearby_loading');
     try {
         const position = await getMallPosition();
-        const latitude = typeof position.lat === 'function' ? position.lat() : position.lat;
-        const longitude = typeof position.lng === 'function' ? position.lng() : position.lng;
-        const query = new URLSearchParams({ lat: latitude, lng: longitude });
+        const query = new URLSearchParams({ lat: position[0], lng: position[1] });
         const response = await fetch(`{{ route('map.nearby') }}?${query}`);
         const data = await response.json();
         if (!response.ok) throw new Error(data.message || window.sumateraTranslate('nearby_unavailable'));
@@ -245,11 +260,12 @@ document.getElementById('load-nearby').addEventListener('click', async event => 
             item.append(name, type);
             results.append(item);
             if (mallMap) {
-                new google.maps.Marker({
-                    map: mallMap,
-                    position: { lat: Number(amenity.lat), lng: Number(amenity.lng) },
-                    title: `${amenity.name} (${amenity.type})`
-                });
+                const L = window.sumateraLeaflet;
+                const popup = document.createElement('span');
+                popup.textContent = `${amenity.name} (${amenity.type})`;
+                L.marker([Number(amenity.lat), Number(amenity.lng)], {
+                    icon: L.divIcon({ className: 'amenity-map-marker', html: '<span></span>', iconSize: [18, 18], iconAnchor: [9, 9] })
+                }).bindPopup(popup).addTo(mallMap);
             }
         });
         status.textContent = data.amenities.length

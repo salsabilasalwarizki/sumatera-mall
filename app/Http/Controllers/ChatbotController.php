@@ -3,7 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\ChatLog;
-use App\Services\GeminiService;
+use App\Services\OpenAICompatibleChatService;
 use App\Services\SparqlService;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
@@ -18,7 +18,7 @@ class ChatbotController extends Controller
 {
     public function __construct(
         private readonly SparqlService $sparql,
-        private readonly GeminiService $gemini,
+        private readonly OpenAICompatibleChatService $chatCompletion,
     ) {}
 
     public function chat(Request $request): JsonResponse
@@ -35,6 +35,18 @@ class ChatbotController extends Controller
 
         $sessionId = $validated['session_id'] ?? Str::random(24);
         $intent = $this->parseIntent($message);
+        if ($intent['type'] === 'unknown') {
+            return response()->json([
+                'reply' => ($validated['locale'] ?? 'id') === 'en'
+                    ? 'This question cannot be processed because it is outside the context.'
+                    : 'pertanyaan tidak dapat di proses karena diluar konteks',
+                'ai_enabled' => $this->chatCompletion->isConfigured(),
+                'notice' => null,
+                'intent' => $intent,
+                'results_count' => 0,
+                'session_id' => $sessionId,
+            ]);
+        }
         $sparql = $this->generateSparql($intent);
 
         try {
@@ -51,18 +63,62 @@ class ChatbotController extends Controller
         }
 
         $locale = $validated['locale'] ?? 'id';
-        $aiEnabled = $this->gemini->isConfigured();
+        $aiEnabled = $this->chatCompletion->isConfigured();
         $notice = null;
         if ($aiEnabled) {
             try {
-                $reply = $this->gemini->reply($message, $results, $locale);
-            } catch (ConnectionException|RequestException|RuntimeException $exception) {
-                Log::error('SumateraMall Gemini response failed.', [
+                $history = ChatLog::query()
+                    ->where('session_id', $sessionId)
+                    ->latest('id')
+                    ->limit(6)
+                    ->get(['user_message', 'bot_reply'])
+                    ->reverse()
+                    ->map(fn (ChatLog $log): array => [
+                        'user' => $log->user_message,
+                        'assistant' => $log->bot_reply,
+                    ])
+                    ->values()
+                    ->all();
+                $reply = $this->chatCompletion->reply($message, $results, $locale, $history);
+            } catch (ConnectionException $exception) {
+                Log::error('SumatraMall chat completion response failed.', [
                     'exception' => $exception->getMessage(),
                 ]);
 
                 return response()->json([
-                    'message' => 'The AI assistant is temporarily unavailable. Please try again later.',
+                    'message' => $locale === 'en'
+                        ? 'The NVIDIA AI service timed out or is unreachable. Please try again in a moment.'
+                        : 'Layanan AI NVIDIA terlalu lama merespons atau tidak dapat dijangkau. Silakan coba lagi sebentar.',
+                ], 503);
+            } catch (RequestException $exception) {
+                Log::error('SumatraMall chat completion request was rejected.', [
+                    'status' => $exception->response->status(),
+                ]);
+                $message = match ($exception->response->status()) {
+                    401 => $locale === 'en'
+                        ? 'The NVIDIA API key is invalid. Check NVIDIA_API_KEY in .env.'
+                        : 'API key NVIDIA tidak valid. Periksa NVIDIA_API_KEY di .env.',
+                    402 => $locale === 'en'
+                        ? 'The NVIDIA API account has insufficient credits.'
+                        : 'Kredit pada akun NVIDIA API tidak mencukupi.',
+                    429 => $locale === 'en'
+                        ? 'The NVIDIA API rate limit was reached. Please try again shortly.'
+                        : 'Batas request NVIDIA API tercapai. Silakan coba lagi sebentar.',
+                    default => $locale === 'en'
+                        ? 'The NVIDIA AI service rejected the request. Check the model and API settings.'
+                        : 'Layanan AI NVIDIA menolak permintaan. Periksa model dan konfigurasi API.',
+                };
+
+                return response()->json(['message' => $message], 503);
+            } catch (RuntimeException $exception) {
+                Log::error('SumatraMall chat completion returned an invalid response.', [
+                    'exception' => $exception->getMessage(),
+                ]);
+
+                return response()->json([
+                    'message' => $locale === 'en'
+                        ? 'The NVIDIA AI service returned an invalid response. Please try again later.'
+                        : 'Layanan AI NVIDIA mengirim respons yang tidak valid. Silakan coba lagi nanti.',
                 ], 503);
             }
         } else {
@@ -98,13 +154,16 @@ class ChatbotController extends Controller
         $text = mb_strtolower($message);
         $intent = ['type' => 'unknown'];
 
-        if (preg_match('/(buka sekarang|masih buka|jam buka|open now|still open|opening hours)/u', $text)) {
+        if (preg_match('/(fitur|website|situs|aplikasi|sumatramall|tentang kami|cara menggunakan|tentang web|tentang situs|about this website|about sumatramall|website features|what can this site)/u', $text)) {
+            $intent['type'] = 'site_info';
+        } elseif (preg_match('/(buka sekarang|masih buka|jam buka|open now|still open|opening hours)/u', $text)) {
             $intent['type'] = 'open_now';
         } elseif (preg_match('/(budget|biaya|estimasi|cost|estimate)/u', $text)) {
             $intent['type'] = 'budget';
         } elseif (preg_match('/(top|terbaik|rating|populer|best|highest rated|popular)/u', $text)) {
             $intent['type'] = 'top_rated';
-        } elseif (preg_match('/(info|tentang|profil|about|profile)/u', $text)) {
+        } elseif (preg_match('/(info|tentang|profil|about|profile)/u', $text)
+            && preg_match('/(mall|shopping center|shopping centre)/u', $text)) {
             $intent['type'] = 'mall_info';
         } elseif (preg_match('/(kota|daftar mall|provinsi|mall di|city|list malls|province|malls in)/u', $text)) {
             $intent['type'] = 'list_by_region';
@@ -207,6 +266,14 @@ class ChatbotController extends Controller
                 break;
             }
         }
+        if ($intent['type'] === 'unknown' && isset($intent['mall'])) {
+            $intent['type'] = 'mall_info';
+        } elseif ($intent['type'] === 'unknown' && preg_match(
+            '/(mall|toko|belanja|sumatera|sumatra|rute|peta|lokasi|rekomendasi|pencarian|filter|sparql|rdf|semantic|store|shopping|route|map|location|recommendation|search|filter|ontology)/u',
+            $text,
+        )) {
+            $intent['type'] = 'site_info';
+        }
 
         return $intent;
     }
@@ -219,6 +286,16 @@ class ChatbotController extends Controller
         $prefix = "PREFIX mm: <http://sumateramall.org/ontology#>\n"
             ."PREFIX schema: <http://schema.org/>\n"
             ."PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n";
+        if ($intent['type'] === 'site_info') {
+            return $prefix.<<<'SPARQL'
+SELECT ?mallCount ?storeCount ?provinceCount ?categoryCount WHERE {
+    { SELECT (COUNT(DISTINCT ?mall) AS ?mallCount) WHERE { ?mall a mm:Mall } }
+    { SELECT (COUNT(DISTINCT ?store) AS ?storeCount) WHERE { ?store a mm:Store } }
+    { SELECT (COUNT(DISTINCT ?province) AS ?provinceCount) WHERE { ?province a mm:Province } }
+    { SELECT (COUNT(DISTINCT ?category) AS ?categoryCount) WHERE { ?category a mm:Category } }
+}
+SPARQL;
+        }
         $provinceFilter = isset($intent['province'])
             ? '?provinceResource schema:name '.$this->sparql->literal($intent['province'])." .\n"
             : '';
@@ -246,13 +323,18 @@ SPARQL;
 
         if ($intent['type'] === 'mall_info' && isset($intent['mall'])) {
             return $prefix.<<<SPARQL
-SELECT ?mallName ?city ?province ?address ?description WHERE {
+SELECT ?mallName ?city ?province ?address ?description ?hours ?website ?wheelchair ?parking ?elevator WHERE {
     BIND(<http://sumateramall.org/resource/Mall/{$intent['mall']}> AS ?mall)
     ?mall schema:name ?mallName ; mm:inCity/mm:inProvince ?provinceResource ; mm:inCity ?cityResource .
     ?cityResource schema:name ?city .
     ?provinceResource schema:name ?province .
     OPTIONAL { ?mall schema:address ?address }
     OPTIONAL { ?mall schema:description ?description }
+    OPTIONAL { ?mall mm:openingHoursText ?hours }
+    OPTIONAL { ?mall schema:url ?website }
+    OPTIONAL { ?mall mm:wheelchairAccessible ?wheelchair }
+    OPTIONAL { ?mall mm:hasParking ?parking }
+    OPTIONAL { ?mall mm:hasElevator ?elevator }
 }
 SPARQL;
         }
@@ -323,6 +405,13 @@ SPARQL;
         }
 
         return match ($intent['type']) {
+            'site_info' => $english
+                ? 'SumatraMall explores mall and store data with semantic search. It includes mall comparisons, category recommendations, price-level estimates, open-now filters, and multi-stop routes using OpenStreetMap. Current graph totals: '
+                    .($results[0]['mallCount'] ?? '0').' malls, '.($results[0]['storeCount'] ?? '0').' stores, '
+                    .($results[0]['provinceCount'] ?? '0').' provinces, and '.($results[0]['categoryCount'] ?? '0').' categories.'
+                : 'SumatraMall membantu menjelajahi data mall dan toko melalui pencarian semantik. Fitur yang tersedia mencakup perbandingan mall, rekomendasi kategori, estimasi tingkat harga, filter buka sekarang, dan rute multi-stop dengan OpenStreetMap. Data graph saat ini: '
+                    .($results[0]['mallCount'] ?? '0').' mall, '.($results[0]['storeCount'] ?? '0').' toko, '
+                    .($results[0]['provinceCount'] ?? '0').' provinsi, dan '.($results[0]['categoryCount'] ?? '0').' kategori.',
             'find_store' => ($english ? 'I found ' : 'Saya menemukan ').count($results)
                 .($english ? (count($results) === 1 ? " store:\n\n" : " stores:\n\n") : " toko:\n\n").implode("\n", array_map(
                     fn (array $row): string => '- '.$row['storeName'].($english ? ' at ' : ' di ').$row['mallName'].' ('.$row['city'].')'

@@ -67,4 +67,35 @@ SPARQL, 60);
 
         return response()->json(['amenities' => $amenities]);
     }
+
+    public function geocode(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'query' => ['required', 'string', 'max:500'],
+            'fallback' => ['nullable', 'string', 'max:500'],
+        ]);
+        $query = trim($validated['query']);
+        $fallbackQuery = trim((string) ($validated['fallback'] ?? ''));
+        $cacheKey = 'osm_geocode_'.md5(mb_strtolower($query.'|'.$fallbackQuery));
+
+        try {
+            $coordinates = Cache::remember(
+                $cacheKey,
+                60 * 60 * 24 * 30,
+                fn (): array => $this->osm->geocodeAddress($query, $fallbackQuery),
+            );
+        } catch (ConnectionException|RequestException|RuntimeException $exception) {
+            Log::warning('OpenStreetMap mall geocoding failed.', [
+                'message' => $exception->getMessage(),
+            ]);
+
+            return response()->json([
+                'message' => $exception instanceof RequestException && $exception->response->status() === 403
+                    ? 'OpenStreetMap geocoding denied this request. Set OSM_USER_AGENT in .env to identify this app and include a valid contact email, then run php artisan config:clear.'
+                    : 'This mall location could not be found. Add its coordinates to the RDF dataset or check the mall name and address.',
+            ], 503);
+        }
+
+        return response()->json($coordinates);
+    }
 }

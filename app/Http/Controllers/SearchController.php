@@ -3,6 +3,8 @@
 namespace App\Http\Controllers;
 
 use App\Services\SparqlService;
+use App\Support\RdfImageUrl;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\View\View;
 
@@ -52,13 +54,18 @@ SPARQL);
             'search' => ['nullable', 'string', 'max:100'],
         ]);
         $filters = [];
+        $mallFilters = [];
 
         if (! empty($validated['city'])) {
-            $filters[] = '?cityRes = '.$this->sparql->internalResource($validated['city'], 'City');
+            $cityFilter = '?cityRes = '.$this->sparql->internalResource($validated['city'], 'City');
+            $filters[] = $cityFilter;
+            $mallFilters[] = $cityFilter;
         }
 
         if (! empty($validated['mall'])) {
-            $filters[] = '?mall = '.$this->sparql->internalResource($validated['mall'], 'Mall');
+            $mallFilter = '?mall = '.$this->sparql->internalResource($validated['mall'], 'Mall');
+            $filters[] = $mallFilter;
+            $mallFilters[] = $mallFilter;
         }
 
         if (! empty($validated['category'])) {
@@ -101,54 +108,108 @@ SPARQL;
         if ($searchTokens === []) {
             $searchTerm = '';
         }
-        $queryLimit = $searchTerm === '' ? 200 : 2000;
+        $queryLimit = $searchTerm === '' ? 200 : 5000;
         $filterClause = $filters === [] ? '' : 'FILTER('.implode(' && ', $filters).')';
-        $searchCandidateFilters = $searchTerm === '' ? '' : $this->searchCandidateFilters($searchTerm);
-        $buildQuery = fn (string $candidateFilters): string => <<<SPARQL
+        $mallFilterClause = $mallFilters === [] ? '' : 'FILTER('.implode(' && ', $mallFilters).')';
+        $searchCandidateFilters = $searchTerm === '' ? '' : $this->searchCandidateFilters($searchTokens);
+        $mallCandidateFilters = $searchTerm === '' ? '' : $this->searchCandidateFilters($searchTokens, ['?mallName', '?city', '?address']);
+        $buildQuery = fn (string $candidateFilters, string $mallCandidateFilters): string => <<<SPARQL
 PREFIX mm: <http://sumateramall.org/ontology#>
 PREFIX schema: <http://schema.org/>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-SELECT DISTINCT ?store ?storeName ?mallName ?city ?category ?rating ?status ?floor ?address ?image ?lat ?lng ?priceLevel
+SELECT DISTINCT ?resultType ?mallId ?store ?storeName ?mallName ?city ?category ?rating ?status ?floor ?address ?image ?lat ?lng ?priceLevel
 WHERE {
-    ?store a mm:Store ;
-           schema:name ?storeName ;
-           mm:locatedIn ?mall ;
-           mm:hasCategory ?catRes .
-    ?mall schema:name ?mallName ;
-          mm:inCity ?cityRes .
-    ?cityRes schema:name ?city .
-    ?catRes schema:name ?category .
-    OPTIONAL { ?store mm:rating ?rating }
-    OPTIONAL { ?store mm:businessStatus ?status }
-    OPTIONAL { ?store mm:floor ?floor }
-    OPTIONAL { ?store mm:priceLevel ?priceLevel }
-    OPTIONAL { ?store schema:image ?image }
-    OPTIONAL { ?mall schema:address ?address }
-    OPTIONAL {
-        ?store schema:geo ?geo .
-        ?geo schema:latitude ?lat ; schema:longitude ?lng .
+    {
+        ?store a mm:Store ;
+               schema:name ?storeName ;
+               mm:locatedIn ?mall ;
+               mm:hasCategory ?catRes .
+        ?mall schema:name ?mallName ;
+              mm:inCity ?cityRes .
+        ?cityRes schema:name ?city .
+        ?catRes schema:name ?category .
+        OPTIONAL { ?store mm:rating ?rating }
+        OPTIONAL { ?store mm:businessStatus ?status }
+        OPTIONAL { ?store mm:floor ?floor }
+        OPTIONAL { ?store mm:priceLevel ?priceLevel }
+        OPTIONAL { ?store schema:image ?image }
+        OPTIONAL { ?mall schema:address ?address }
+        OPTIONAL {
+            ?store schema:geo ?geo .
+            ?geo schema:latitude ?lat ; schema:longitude ?lng .
+        }
+        {$extraPatterns}
+        {$filterClause}
+        {$candidateFilters}
+        BIND("store" AS ?resultType)
+        BIND("" AS ?mallId)
     }
-    {$extraPatterns}
-    {$filterClause}
-    {$candidateFilters}
+    UNION
+    {
+        ?mall a mm:Mall ;
+              schema:name ?mallName ;
+              mm:inCity ?cityRes .
+        ?cityRes schema:name ?city .
+        BIND(?mallName AS ?storeName)
+        OPTIONAL { ?mall schema:address ?address }
+        OPTIONAL { ?mall schema:image ?image }
+        OPTIONAL {
+            ?mall schema:geo ?geo .
+            ?geo schema:latitude ?lat ; schema:longitude ?lng .
+        }
+        BIND(STRAFTER(STR(?mall), "resource/Mall/") AS ?mallId)
+        BIND("mall" AS ?resultType)
+        {$mallFilterClause}
+        {$mallCandidateFilters}
+    }
 }
-ORDER BY DESC(?rating) ?storeName
+ORDER BY DESC(?rating) ?resultType ?storeName
 LIMIT {$queryLimit}
 SPARQL;
-        $results = $this->sparql->query($buildQuery($searchCandidateFilters), 5, 15);
+        $results = $this->sparql->query($buildQuery($searchCandidateFilters, $mallCandidateFilters), 5, 15);
+        $results = array_map(static function (array $result): array {
+            $result['image'] = RdfImageUrl::fromBinding($result['image'] ?? null);
+
+            return $result;
+        }, $results);
 
         if ($searchTerm !== '') {
             $results = $this->rankResults($results, $searchTokens);
             if ($results === [] && $searchCandidateFilters !== '') {
-                $results = $this->rankResults($this->sparql->query($buildQuery(''), 5, 15), $searchTokens);
+                $results = $this->rankResults($this->sparql->query($buildQuery('', ''), 5, 15), $searchTokens);
             }
         }
+        $mallResults = array_values(array_filter($results, static fn (array $result): bool => ($result['resultType'] ?? 'store') === 'mall'));
+        $storeResults = array_values(array_filter($results, static fn (array $result): bool => ($result['resultType'] ?? 'store') !== 'mall'));
+        $suggestedSearch = $searchTerm !== '' && ! $this->isSingleLetterSearch($searchTokens)
+            ? $this->suggestedSearch($results, $searchTokens)
+            : null;
 
         return view('search.results', [
-            'results' => $results,
-            'count' => count($results),
+            'results' => $storeResults,
+            'mallResults' => $mallResults,
+            'count' => count($storeResults) + count($mallResults),
             'searchTerm' => $searchTerm,
+            'suggestedSearch' => $suggestedSearch,
         ]);
+    }
+
+    public function checkStore(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'name' => ['required', 'string', 'max:100'],
+        ]);
+        $name = $this->sparql->literal(trim($validated['name']));
+        $exists = $this->sparql->ask(<<<SPARQL
+PREFIX mm: <http://sumateramall.org/ontology#>
+PREFIX schema: <http://schema.org/>
+ASK {
+    ?store a mm:Store ;
+           schema:name {$name} .
+}
+SPARQL);
+
+        return response()->json(['exists' => $exists]);
     }
 
     /**
@@ -156,13 +217,16 @@ SPARQL;
      */
     private function searchTokens(string $search): array
     {
-        $normalized = mb_strtolower($search);
-        $normalized = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $normalized) ?? '';
-
-        return array_values(array_map(
-            fn (string $token): string => $this->normalizeSearchToken($token),
-            array_filter(explode(' ', trim($normalized))),
+        $tokens = array_values(array_filter(explode(' ', $this->normalizeSearchText($search))));
+        $tokensWithoutStopWords = array_values(array_filter(
+            $tokens,
+            fn (string $token): bool => preg_match(
+                '/\A(?:mall|malls|shopping|centre|center|di|ke|dari|dan|yang|the|of|and|in|at)\z/u',
+                $token,
+            ) !== 1,
         ));
+
+        return $tokensWithoutStopWords !== [] ? $tokensWithoutStopWords : $tokens;
     }
 
     private function normalizeSearchToken(string $token): string
@@ -174,15 +238,16 @@ SPARQL;
         return $token;
     }
 
-    private function searchCandidateFilters(string $search): string
+    private function searchCandidateFilters(array $searchTokens, array $fields = ['?storeName', '?mallName', '?city', '?category', '?floor', '?address']): string
     {
-        $rawTokens = mb_strtolower($search);
-        $rawTokens = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $rawTokens) ?? '';
-        $fields = ['?storeName', '?mallName', '?city', '?category', '?floor', '?address'];
         $filters = [];
 
-        foreach (array_filter(explode(' ', trim($rawTokens))) as $rawToken) {
+        foreach ($searchTokens as $rawToken) {
             $normalizedToken = $this->normalizeSearchToken($rawToken);
+            $singleLetterQuery = mb_strlen($rawToken) === 1 && preg_match('/\p{L}/u', $rawToken) === 1;
+            $candidateFields = $singleLetterQuery
+                ? array_values(array_filter($fields, static fn (string $field): bool => in_array($field, ['?storeName', '?mallName'], true)))
+                : $fields;
             $prefixes = array_unique([
                 mb_substr($rawToken, 0, 3),
                 mb_substr($normalizedToken, 0, 3),
@@ -190,12 +255,19 @@ SPARQL;
             $alternatives = [];
 
             foreach ($prefixes as $prefix) {
-                if (mb_strlen($prefix) < 2) {
+                if ($prefix === '') {
                     continue;
                 }
 
-                foreach ($fields as $field) {
-                    $alternatives[] = 'CONTAINS(LCASE(STR('.$field.')), LCASE('.$this->sparql->literal($prefix).'))';
+                foreach ($candidateFields as $field) {
+                    $match = $singleLetterQuery ? 'STRSTARTS' : 'CONTAINS';
+                    $alternatives[] = $match.'(LCASE(STR('.$field.')), LCASE('.$this->sparql->literal($prefix).'))';
+                }
+            }
+
+            if (! $singleLetterQuery) {
+                foreach ($candidateFields as $field) {
+                    $alternatives[] = 'REGEX(STR('.$field.'), '.$this->sparql->literal($normalizedToken).', "i")';
                 }
             }
 
@@ -248,41 +320,186 @@ SPARQL;
             return 0;
         }
 
-        $fields = ['storeName', 'mallName', 'city', 'category', 'floor', 'address'];
-        $text = mb_strtolower(implode(' ', array_map(
-            fn (string $field): string => $result[$field] ?? '',
-            $fields,
-        )));
-        $text = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $text) ?? '';
-        $words = array_map(
-            fn (string $word): string => $this->normalizeSearchToken($word),
-            array_filter(explode(' ', trim($text))),
-        );
-        $scores = [];
+        if ($this->isSingleLetterSearch($queryTokens)) {
+            $initial = $queryTokens[0];
+            $storeName = $this->normalizeSearchText($result['storeName'] ?? '');
+            $mallName = $this->normalizeSearchText($result['mallName'] ?? '');
 
-        foreach ($queryTokens as $queryToken) {
-            $bestScore = 0.0;
-            foreach ($words as $word) {
-                if ($queryToken === $word) {
-                    $bestScore = 1.0;
-                    break;
+            if (str_starts_with($storeName, $initial)) {
+                return 1.0;
+            }
+
+            return str_starts_with($mallName, $initial) ? 0.9 : 0.0;
+        }
+
+        $fieldWeights = [
+            'storeName' => 1.0,
+            'mallName' => 0.9,
+            'city' => 0.85,
+            'category' => 0.75,
+            'address' => 0.65,
+            'floor' => 0.55,
+        ];
+        $queryPhrase = implode(' ', $queryTokens);
+        $bestScoreByToken = array_fill(0, count($queryTokens), 0.0);
+        $bestFieldScore = 0.0;
+
+        foreach ($fieldWeights as $field => $weight) {
+            $fieldText = $this->normalizeSearchText($result[$field] ?? '');
+            if ($fieldText === '') {
+                continue;
+            }
+
+            $words = explode(' ', $fieldText);
+            $fieldScores = [];
+
+            foreach ($queryTokens as $index => $queryToken) {
+                $bestWordScore = 0.0;
+                foreach ($words as $word) {
+                    $bestWordScore = max($bestWordScore, $this->wordMatchScore($queryToken, $word));
                 }
 
-                $length = max(strlen($queryToken), strlen($word));
-                if ($length === 0 || $length > 255) {
+                $weightedScore = $bestWordScore * $weight;
+                $bestScoreByToken[$index] = max($bestScoreByToken[$index], $weightedScore);
+                $fieldScores[] = $bestWordScore;
+            }
+
+            if (min($fieldScores) < 0.55) {
+                continue;
+            }
+
+            $fieldScore = array_sum($fieldScores) / count($fieldScores);
+            if ($fieldText === $queryPhrase) {
+                $fieldScore = 1.0;
+            } elseif (str_contains(' '.$fieldText.' ', ' '.$queryPhrase.' ')) {
+                $fieldScore = max($fieldScore, 0.95);
+            }
+
+            $bestFieldScore = max($bestFieldScore, $fieldScore * $weight);
+        }
+
+        if (min($bestScoreByToken) < 0.5) {
+            return 0;
+        }
+
+        return max($bestFieldScore, array_sum($bestScoreByToken) / count($bestScoreByToken));
+    }
+
+    /**
+     * @param  array<int, array<string, string>>  $results
+     * @param  list<string>  $queryTokens
+     */
+    private function suggestedSearch(array $results, array $queryTokens): ?string
+    {
+        $fieldWeights = [
+            'storeName' => 1.0,
+            'mallName' => 0.9,
+            'city' => 0.85,
+            'category' => 0.75,
+        ];
+        $bestSuggestion = null;
+        $bestScore = 0.0;
+        $normalizedQuery = implode(' ', $queryTokens);
+
+        foreach ($results as $result) {
+            foreach ($fieldWeights as $field => $weight) {
+                $candidate = trim($result[$field] ?? '');
+                $normalizedCandidate = $this->normalizeSearchText($candidate);
+                if ($candidate === '' || $normalizedCandidate === '') {
                     continue;
                 }
 
-                $bestScore = max($bestScore, 1 - levenshtein($queryToken, $word) / $length);
-            }
+                $words = explode(' ', $normalizedCandidate);
+                $scores = [];
+                $hasTypo = false;
+                foreach ($queryTokens as $queryToken) {
+                    $bestWordScore = 0.0;
+                    $bestWord = '';
+                    foreach ($words as $word) {
+                        $wordScore = $this->wordMatchScore($queryToken, $word);
+                        if ($wordScore > $bestWordScore) {
+                            $bestWordScore = $wordScore;
+                            $bestWord = $word;
+                        }
+                    }
 
-            if ($bestScore < 0.55) {
-                return 0;
-            }
+                    $scores[] = $bestWordScore;
+                    $hasTypo = $hasTypo || (
+                        $bestWordScore > 0
+                        && $queryToken !== $bestWord
+                        && ! str_starts_with($bestWord, $queryToken)
+                        && ! (ctype_digit($queryToken) && str_contains($bestWord, $queryToken))
+                    );
+                }
 
-            $scores[] = $bestScore;
+                if (min($scores) < 0.55 || ! $hasTypo) {
+                    continue;
+                }
+
+                $score = (array_sum($scores) / count($scores)) * $weight;
+                if ($score > $bestScore) {
+                    $bestScore = $score;
+                    $bestSuggestion = $candidate;
+                }
+            }
         }
 
-        return array_sum($scores) / count($scores);
+        if ($bestSuggestion === null || $this->normalizeSearchText($bestSuggestion) === $normalizedQuery) {
+            return null;
+        }
+
+        return $bestSuggestion;
+    }
+
+    /**
+     * @param  list<string>  $queryTokens
+     */
+    private function isSingleLetterSearch(array $queryTokens): bool
+    {
+        return count($queryTokens) === 1
+            && mb_strlen($queryTokens[0]) === 1
+            && preg_match('/\p{L}/u', $queryTokens[0]) === 1;
+    }
+
+    private function normalizeSearchText(string $text): string
+    {
+        $normalized = mb_strtolower($text);
+        $normalized = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $normalized) ?? '';
+        $words = array_filter(explode(' ', trim($normalized)));
+
+        return implode(' ', array_map(
+            fn (string $word): string => $this->normalizeSearchToken($word),
+            $words,
+        ));
+    }
+
+    private function wordMatchScore(string $queryToken, string $word): float
+    {
+        if ($queryToken === $word) {
+            return 1.0;
+        }
+
+        if (str_starts_with($word, $queryToken)) {
+            return mb_strlen($queryToken) === 1 ? 0.75 : 0.9;
+        }
+
+        if (ctype_digit($queryToken) && str_contains($word, $queryToken)) {
+            return 0.8;
+        }
+
+        if (mb_strlen($queryToken) < 3) {
+            return 0.0;
+        }
+
+        $length = max(strlen($queryToken), strlen($word));
+        if ($length === 0 || $length > 255) {
+            return 0.0;
+        }
+
+        $similarity = 1 - levenshtein($queryToken, $word) / $length;
+
+        $minimumSimilarity = max(mb_strlen($queryToken), mb_strlen($word)) >= 5 ? 0.6 : 0.65;
+
+        return $similarity >= $minimumSimilarity ? $similarity : 0.0;
     }
 }

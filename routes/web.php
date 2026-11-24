@@ -21,9 +21,13 @@ Route::get('/search', [SearchController::class, 'index'])->name('search.index');
 Route::match(['get', 'post'], '/search/filter', [SearchController::class, 'filter'])
     ->middleware('throttle:30,1')
     ->name('search.filter');
+Route::post('/search/exists', [SearchController::class, 'checkStore'])
+    ->middleware('throttle:30,1')
+    ->name('search.exists');
 
 Route::get('/map', [MapController::class, 'index'])->name('map.index');
 Route::get('/map/nearby', [MapController::class, 'nearby'])->middleware('throttle:20,1')->name('map.nearby');
+Route::get('/map/geocode', [MapController::class, 'geocode'])->middleware('throttle:10,1')->name('map.geocode');
 
 Route::get('/planner', [RoutePlannerController::class, 'index'])->name('planner.index');
 Route::post('/planner/calculate', [RoutePlannerController::class, 'calculate'])->name('planner.calculate');

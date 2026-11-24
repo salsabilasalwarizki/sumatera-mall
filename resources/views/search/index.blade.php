@@ -102,7 +102,7 @@
         <div class="mb-6">
             <label data-i18n="field_store_search" class="block text-sm font-medium mb-2 text-gray-300">Cari nama toko</label>
             <div class="flex gap-2">
-            <input type="search" name="search" value="{{ request('search') }}"
+            <input type="search" name="search" value="{{ request('search') }}" maxlength="100"
                    id="search-store-input"
                    data-i18n-placeholder="field_store_search" placeholder="Cari nama toko"
                    class="flex-1 glass bg-transparent p-3 rounded-xl border border-white/10 focus:border-neon-cyan/50 focus:outline-none">
