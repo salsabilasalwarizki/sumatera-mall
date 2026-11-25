@@ -10,6 +10,18 @@
     </div>
 
     <div class="glass rounded-3xl p-4 mb-8">
+        <div class="map-location-tools">
+            <div>
+                <strong data-i18n="map_location_heading">Temukan mall terdekat</strong>
+                <p data-i18n="map_location_note">Izinkan akses lokasi untuk menghitung jarak dan membuka petunjuk arah.</p>
+            </div>
+            <button type="button" id="map-use-location" class="mall-landing__location-button">
+                <span aria-hidden="true">⌖</span>
+                <span data-i18n="landing_use_location">Gunakan lokasi saya</span>
+            </button>
+        </div>
+        <p id="map-location-status" class="text-sm text-gray-400 px-3 pb-3" role="status" aria-live="polite"
+           data-i18n="map_location_note">Izinkan akses lokasi untuk menghitung jarak dan membuka petunjuk arah.</p>
         <div id="map" class="rounded-2xl" style="height: 600px;"></div>
         <p id="map-status" class="text-sm text-gray-400 px-3 pt-3" role="status" aria-live="polite"></p>
     </div>
@@ -31,7 +43,8 @@
         <p class="text-xs text-gray-500 mb-3"><span data-i18n="showing">Menampilkan</span> <strong id="map-mall-count">{{ count($malls) }}</strong> <span data-i18n="mall_items">mall</span></p>
         <div class="grid md:grid-cols-3 gap-3 max-h-96 overflow-y-auto">
             @foreach($malls as $mall)
-            <article class="glass p-3 rounded-xl" data-map-mall data-province="{{ $mall['province'] }}" data-city="{{ $mall['city'] }}">
+            <article class="glass p-3 rounded-xl" data-map-mall data-province="{{ $mall['province'] }}" data-city="{{ $mall['city'] }}"
+                     data-lat="{{ $mall['lat'] ?? '' }}" data-lng="{{ $mall['lng'] ?? '' }}">
                 <a href="{{ route('malls.show', ['id' => $mall['id']]) }}" class="block">
                     <strong class="block">{{ $mall['name'] }}</strong>
                     <span class="text-sm text-gray-400">{{ $mall['city'] }}, {{ $mall['province'] }}</span>
@@ -42,6 +55,10 @@
                         data-lat="{{ $mall['lat'] ?? '' }}" data-lng="{{ $mall['lng'] ?? '' }}">
                     <span data-i18n="maps_locate">Tampilkan di peta</span>
                 </button>
+                <span class="map-mall-distance text-xs text-gray-400 ml-2" data-mall-distance hidden></span>
+                <a class="block text-xs text-neon-cyan mt-2 hover:underline" data-map-directions
+                   data-lat="{{ $mall['lat'] ?? '' }}" data-lng="{{ $mall['lng'] ?? '' }}"
+                   target="_blank" rel="noopener noreferrer" hidden data-i18n="maps_directions">Petunjuk arah dari lokasi saya</a>
                 <a class="block text-xs text-gray-400 mt-1 hover:underline"
                    href="https://www.openstreetmap.org/search?query={{ urlencode(($mall['address'] ?? $mall['name']).', '.$mall['city'].', '.$mall['province'].', Indonesia') }}"
                    target="_blank" rel="noopener noreferrer" data-i18n="maps_open">Buka di OpenStreetMap</a>
@@ -56,9 +73,13 @@
 <script>
 const mallMapElement = document.getElementById('map');
 const mapStatus = document.getElementById('map-status');
+const mapLocationStatus = document.getElementById('map-location-status');
+const locationButton = document.getElementById('map-use-location');
 let mallMap;
 let L;
 const mallMarkers = new Map();
+let userLocation;
+let userMarker;
 
 function markerIcon() {
     const L = window.sumateraLeaflet;
@@ -136,6 +157,98 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         updateMapList();
     }));
+
+    locationButton.addEventListener('click', async () => {
+        if (!navigator.geolocation) {
+            mapLocationStatus.textContent = window.sumateraTranslate('geolocation_unsupported');
+            return;
+        }
+
+        locationButton.disabled = true;
+        mapLocationStatus.textContent = window.sumateraTranslate('landing_location_loading');
+        try {
+            const position = await new Promise((resolve, reject) => {
+                navigator.geolocation.getCurrentPosition(resolve, reject, {
+                    enableHighAccuracy: false, timeout: 10000, maximumAge: 300000
+                });
+            });
+            province = '';
+            city = '';
+            filters.forEach(item => {
+                const active = (item.hasAttribute('data-map-province') && item.dataset.mapProvince === '')
+                    || (item.hasAttribute('data-map-city') && item.dataset.mapCity === '');
+                item.classList.toggle('bubble-filter--active', active);
+                item.setAttribute('aria-pressed', String(active));
+            });
+            updateMapList();
+            userLocation = [position.coords.latitude, position.coords.longitude];
+            if (userMarker) {
+                userMarker.setLatLng(userLocation);
+            } else {
+                userMarker = L.circleMarker(userLocation, {
+                    radius: 8, color: '#ffffff', weight: 2, fillColor: '#bd8f2f', fillOpacity: 1
+                }).addTo(mallMap).bindPopup(popupContent(window.sumateraTranslate('location')));
+            }
+
+            const distanceBetween = (destination) => {
+                const radians = value => value * Math.PI / 180;
+                const latDelta = radians(destination[0] - userLocation[0]);
+                const lngDelta = radians(destination[1] - userLocation[1]);
+                const startLat = radians(userLocation[0]);
+                const endLat = radians(destination[0]);
+                const arc = Math.sin(latDelta / 2) ** 2
+                    + Math.cos(startLat) * Math.cos(endLat) * Math.sin(lngDelta / 2) ** 2;
+                return 6371000 * 2 * Math.atan2(Math.sqrt(arc), Math.sqrt(1 - arc));
+            };
+            const located = cards.map(card => {
+                const lat = Number(card.dataset.lat);
+                const lng = Number(card.dataset.lng);
+                if (card.dataset.lat === '' || card.dataset.lng === ''
+                    || !Number.isFinite(lat) || lat < -90 || lat > 90
+                    || !Number.isFinite(lng) || lng < -180 || lng > 180) return null;
+
+                const distance = distanceBetween([lat, lng]);
+                const distanceLabel = distance >= 1000 ? `${(distance / 1000).toFixed(1)} km` : `${Math.round(distance)} m`;
+                const distanceElement = card.querySelector('[data-mall-distance]');
+                const directions = card.querySelector('[data-map-directions]');
+                if (distanceElement) {
+                    distanceElement.hidden = false;
+                    distanceElement.textContent = distanceLabel;
+                }
+                if (directions) {
+                    const route = `${userLocation[0]},${userLocation[1]};${lat},${lng}`;
+                    directions.href = `https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route=${encodeURIComponent(route)}`;
+                    directions.hidden = false;
+                }
+
+                return { card, distance, position: [lat, lng] };
+            }).filter(Boolean).sort((left, right) => left.distance - right.distance);
+
+            if (located.length === 0) {
+                mapLocationStatus.textContent = window.sumateraTranslate('landing_coordinates_unavailable');
+                mallMap.setView(userLocation, 13);
+                return;
+            }
+
+            const nearest = located[0];
+            const name = nearest.card.querySelector('strong').textContent.trim();
+            const distanceLabel = nearest.distance >= 1000
+                ? `${(nearest.distance / 1000).toFixed(1)} km`
+                : `${Math.round(nearest.distance)} m`;
+            mapLocationStatus.textContent = window.sumateraTranslate('map_nearest_mall')
+                .replace(':mall', name)
+                .replace(':distance', distanceLabel);
+            mallMap.fitBounds(L.latLngBounds([userLocation, nearest.position]), { padding: [40, 40], maxZoom: 14 });
+            userMarker.openPopup();
+            nearest.card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } catch (error) {
+            mapLocationStatus.textContent = error.code === error.PERMISSION_DENIED
+                ? window.sumateraTranslate('landing_location_failed')
+                : error.message || window.sumateraTranslate('landing_location_failed');
+        } finally {
+            locationButton.disabled = false;
+        }
+    });
 });
 
 const showMapError = error => {

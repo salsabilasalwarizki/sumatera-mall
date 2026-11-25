@@ -19,7 +19,7 @@
     </div>
 
     @if(count($results) > 0)
-    <div class="glass rounded-2xl p-5 mb-8">
+    <section class="search-refinements mb-8" aria-label="Filter hasil pencarian">
         <div class="bubble-filter-row mb-3" role="group" aria-label="Category filters">
             <button type="button" class="bubble-filter bubble-filter--active" data-result-category="" aria-pressed="true" data-i18n="filter_all">All categories</button>
             @foreach(collect($results)->pluck('category')->filter()->unique()->sort() as $category)
@@ -43,10 +43,16 @@
                 <span aria-hidden="true">≤ {{ $priceLevel }} / 4</span>
             </button>
             @endforeach
+            @foreach(collect($results)->pluck('floor')->filter()->unique()->sort() as $floor)
+            <button type="button" class="bubble-filter" data-result-floor="{{ $floor }}" aria-pressed="false">
+                <span data-i18n="field_floor">Lantai</span>
+                <span>{{ $floor }}</span>
+            </button>
+            @endforeach
             <a href="{{ route('search.filter', ['search' => $searchTerm]) }}"
                class="bubble-filter" data-i18n="reset_button">Reset filters</a>
         </div>
-    </div>
+    </section>
     <form id="results-open-filter" action="{{ route('search.filter') }}" method="GET" class="sr-only" aria-hidden="true">
         <input type="hidden" name="search" value="{{ $searchTerm }}">
         @foreach(['city', 'mall', 'category', 'min_rating', 'price_level', 'operational'] as $filter)
@@ -87,7 +93,7 @@
         @forelse($results as $r)
         <div class="glass rounded-2xl p-6 hover:border-neon-cyan/50 transition-all"
              data-result-card data-category="{{ $r['category'] }}" data-city="{{ $r['city'] }}"
-             data-rating="{{ $r['rating'] ?? '' }}" data-status="{{ $r['status'] ?? '' }}"
+             data-floor="{{ $r['floor'] ?? '' }}" data-rating="{{ $r['rating'] ?? '' }}" data-status="{{ $r['status'] ?? '' }}"
              data-price-level="{{ $r['priceLevel'] ?? '' }}">
             <div class="flex justify-between items-start mb-4">
                 <div class="flex items-start gap-3">
@@ -112,7 +118,17 @@
             <div class="flex gap-2 flex-wrap mb-3">
                 <span class="glass px-3 py-1 rounded-full text-xs">{{ $r['category'] }}</span>
                 <span class="glass px-3 py-1 rounded-full text-xs">{{ $r['city'] }}</span>
+                @if(!empty($r['floor']))
+                <span class="result-floor" aria-label="Lantai {{ $r['floor'] }}">
+                    <span aria-hidden="true">↟</span>
+                    <span data-i18n="store_floor_label">Lantai</span> {{ $r['floor'] }}
+                </span>
+                @endif
             </div>
+
+            @if(!empty($r['address']))
+            <p class="mb-3 text-xs text-gray-400">{{ $r['address'] }}</p>
+            @endif
 
             @if(!empty($r['status']) && $r['status'] === 'OPERATIONAL')
             <div class="flex items-center gap-2 text-xs text-green-400">
@@ -139,10 +155,18 @@ document.addEventListener('DOMContentLoaded', () => {
     let city = '';
     let minimumRating = 0;
     let maximumPriceLevel = '';
+    let floor = new URLSearchParams(window.location.search).get('floor') || '';
     const cards = Array.from(document.querySelectorAll('[data-result-card]'));
     const mallResultCount = document.querySelectorAll('#matching-malls-title + div article').length;
-    const chips = document.querySelectorAll('[data-result-category], [data-result-city], [data-result-rated], [data-result-price]');
+    const chips = document.querySelectorAll('[data-result-category], [data-result-city], [data-result-rated], [data-result-price], [data-result-floor]');
     const normalize = value => value.trim().toLocaleLowerCase('id');
+
+    chips.forEach(chip => {
+        if (chip.hasAttribute('data-result-floor') && normalize(chip.dataset.resultFloor) === normalize(floor)) {
+            chip.classList.add('bubble-filter--active');
+            chip.setAttribute('aria-pressed', 'true');
+        }
+    });
 
     function updateResults() {
         let visible = 0;
@@ -150,7 +174,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const matches = (!category || normalize(card.dataset.category) === normalize(category))
                 && (!city || normalize(card.dataset.city) === normalize(city))
                 && (!minimumRating || Number(card.dataset.rating) >= minimumRating)
-                && (!maximumPriceLevel || Number(card.dataset.priceLevel) <= Number(maximumPriceLevel));
+                && (!maximumPriceLevel || Number(card.dataset.priceLevel) <= Number(maximumPriceLevel))
+                && (!floor || normalize(card.dataset.floor) === normalize(floor));
             card.hidden = !matches;
             if (matches) visible++;
         });
@@ -166,12 +191,16 @@ document.addEventListener('DOMContentLoaded', () => {
         if (chip.hasAttribute('data-result-price')) {
             maximumPriceLevel = maximumPriceLevel === chip.dataset.resultPrice ? '' : chip.dataset.resultPrice;
         }
+        if (chip.hasAttribute('data-result-floor')) {
+            floor = floor === chip.dataset.resultFloor ? '' : chip.dataset.resultFloor;
+        }
 
         chips.forEach(item => {
             const active = (item.hasAttribute('data-result-category') && item.dataset.resultCategory === category)
                 || (item.hasAttribute('data-result-city') && item.dataset.resultCity === city)
                 || (item.hasAttribute('data-result-rated') && Number(item.dataset.resultRated) === minimumRating && minimumRating > 0)
-                || (item.hasAttribute('data-result-price') && item.dataset.resultPrice === maximumPriceLevel);
+                || (item.hasAttribute('data-result-price') && item.dataset.resultPrice === maximumPriceLevel)
+                || (item.hasAttribute('data-result-floor') && item.dataset.resultFloor === floor);
             item.classList.toggle('bubble-filter--active', active);
             item.setAttribute('aria-pressed', String(active));
         });

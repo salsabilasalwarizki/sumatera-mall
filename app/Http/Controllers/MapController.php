@@ -23,6 +23,7 @@ class MapController extends Controller
     public function index(): View
     {
         $malls = $this->sparql->query(<<<'SPARQL'
+# Refresh map results after a new coordinate dataset is imported.
 PREFIX mm: <http://sumateramall.org/ontology#>
 PREFIX schema: <http://schema.org/>
 SELECT ?id ?name ?city ?province ?address ?lat ?lng
@@ -36,7 +37,7 @@ WHERE {
     BIND(STRAFTER(STR(?mall), 'resource/Mall/') AS ?id)
 }
 ORDER BY ?province ?city ?name
-SPARQL, 60);
+SPARQL, 5);
 
         return view('map.index', compact('malls'));
     }

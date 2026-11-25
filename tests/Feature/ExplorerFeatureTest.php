@@ -10,10 +10,6 @@ use Illuminate\Support\Facades\Http;
 
 uses(RefreshDatabase::class);
 
-beforeEach(function () {
-    config(['services.chat.api_key' => null]);
-});
-
 test('the homepage shows open malls and provides a store search scoped to a mall', function () {
     $this->travelTo(Carbon::parse('2026-11-14 15:00:00', 'Asia/Jakarta'));
     Http::fake([
@@ -50,7 +46,7 @@ test('the homepage shows open malls and provides a store search scoped to a mall
         ->assertSee('name="search"', false)
         ->assertSee('name="mall"', false)
         ->assertSee('mall-city-filter', false)
-        ->assertSee('SumatraMall Assistant')
+        ->assertSee('Asisten SumatraMall')
         ->assertSee('data-theme-choice="light"', false)
         ->assertSee('data-theme-choice="dark"', false)
         ->assertSee('id="site-language"', false)
@@ -93,14 +89,20 @@ test('the shared navigation only includes home, team, and typo-tolerant store se
         ->assertDontSee('href="'.route('planner.index').'"', false);
 });
 
-test('the team page has five editable profile and photo slots', function () {
+test('the team page shows member profiles and available team photos', function () {
     $response = $this->get('/team')->assertOk();
 
-    expect(substr_count($response->getContent(), 'team-card__photo--empty'))->toBe(5)
-        ->and(substr_count($response->getContent(), 'team_member_placeholder'))->toBe(5);
+    expect(substr_count($response->getContent(), 'team-card__photo--empty'))->toBe(4)
+        ->and(substr_count($response->getContent(), 'team_member_placeholder'))->toBe(0);
 
     $response->assertSee('SPARQL')
-        ->assertSee('public/images/team/member-01.jpg');
+        ->assertSee('Salsabila Salwa Rizki')
+        ->assertSee('251402123')
+        ->assertSee('Jesqueen Maria Purba')
+        ->assertSee('Fadila Lisma Sari')
+        ->assertSee('Syifa Nazira')
+        ->assertSee('Jelita Hati Sinurat')
+        ->assertSee('images/teams/salsabilasalwa.png');
 });
 
 test('advanced search exposes category, hours, rating, price, and voice filters', function () {
@@ -111,10 +113,12 @@ test('advanced search exposes category, hours, rating, price, and voice filters'
     $this->get('/search')
         ->assertOk()
         ->assertSee('id="advanced-search-form"', false)
+        ->assertSee('name="province"', false)
         ->assertSee('name="category"', false)
         ->assertSee('name="open_now"', false)
         ->assertSee('name="min_rating"', false)
         ->assertSee('name="price_level"', false)
+        ->assertSee('name="floor"', false)
         ->assertSee('name="operational"', false)
         ->assertSee('data-voice-input="search-store-input"', false);
 });
@@ -514,6 +518,52 @@ test('store search applies opening, rating, price, and operational filters in Fu
     ));
 });
 
+test('store search filters by floor and shows the recorded floor in results', function () {
+    Http::fake([
+        '*' => Http::response([
+            'results' => ['bindings' => [[
+                'store' => ['value' => 'http://sumateramall.org/resource/Store/example_cafe'],
+                'storeName' => ['value' => 'Example Cafe'],
+                'mallName' => ['value' => 'Sun Plaza'],
+                'city' => ['value' => 'Medan'],
+                'province' => ['value' => 'Sumatera Utara'],
+                'category' => ['value' => 'Cafe'],
+                'floor' => ['value' => 'LG'],
+            ]]],
+        ], 200),
+    ]);
+
+    $this->get('/search/filter?search=Toko+di+lantai+LG&floor=LG')
+        ->assertOk()
+        ->assertSee('Example Cafe')
+        ->assertSee('data-i18n="store_floor_label"', false)
+        ->assertSee('LG')
+        ->assertSee('data-floor="LG"', false);
+
+    Http::assertSent(fn ($request): bool => str_contains(
+        rawurldecode($request->url()),
+        'CONTAINS(LCASE(STR(?floor)), LCASE("LG"))',
+    ));
+});
+
+test('store and mall search results can be scoped to a province', function () {
+    Http::fake([
+        '*' => Http::response(['results' => ['bindings' => []]], 200),
+    ]);
+
+    $province = 'http://sumateramall.org/resource/Province/sumatera_utara';
+
+    $this->get('/search/filter?province='.urlencode($province))->assertOk();
+
+    Http::assertSent(fn ($request): bool => str_contains(
+        rawurldecode($request->url()),
+        '?provinceRes = <'.$province.'>',
+    ) && str_contains(
+        rawurldecode($request->url()),
+        'mm:inProvince ?provinceRes',
+    ));
+});
+
 test('the mall map lists address-based locations without requiring stored coordinates', function () {
     Http::fake([
         '*' => Http::response([
@@ -530,6 +580,8 @@ test('the mall map lists address-based locations without requiring stored coordi
     $this->get('/map')
         ->assertOk()
         ->assertSee('Sun Plaza')
+        ->assertSee('id="map-use-location"', false)
+        ->assertSee('data-map-directions', false)
         ->assertSee('data-locate-mall', false)
         ->assertSee('openstreetmap.org/search', false);
 });
@@ -575,20 +627,39 @@ test('chat conversations can be stored after the explorer schema migration', fun
 
     $this->postJson('/chatbot', ['message' => 'cari cafe di Sun Plaza'])
         ->assertOk()
-        ->assertJsonPath('results_count', 0)
-        ->assertJsonPath('ai_enabled', false)
-        ->assertJsonPath('notice', 'AI belum dikonfigurasi; jawaban ini menggunakan aturan pencarian.');
+        ->assertJsonPath('results_count', 0);
 
     expect(ChatLog::query()->count())->toBe(1);
 });
 
 test('the chatbot rejects questions outside the SumatraMall context without querying Fuseki', function () {
-    Http::fake();
+    Http::fake([
+        '*' => Http::response(['results' => ['bindings' => []]], 200),
+    ]);
 
-    $this->postJson('/chatbot', ['message' => 'Tell me a joke about outer space'])
+    $response = $this->postJson('/chatbot', ['message' => 'Tell me a joke about outer space'])
         ->assertOk()
-        ->assertJsonPath('reply', 'pertanyaan tidak dapat di proses karena diluar konteks')
         ->assertJsonPath('intent.type', 'unknown');
+    expect($response->json('reply'))->toContain('Saya bisa menjawab');
+
+    Http::assertNothingSent();
+});
+
+test('the chatbot does not invent answers for ratings and price levels missing from the graph', function () {
+    Http::fake([
+        '*' => Http::response(['results' => ['bindings' => []]], 200),
+    ]);
+
+    foreach (['top rated stores', 'budget mall Sun Plaza'] as $message) {
+        $response = $this->postJson('/chatbot', ['message' => $message])
+            ->assertOk()
+            ->assertJsonPath('intent.type', 'unsupported_data')
+            ->assertJsonPath('results_count', 0);
+
+        expect($response->json('reply'))
+            ->toContain('Graph saat ini tidak mencatat rating toko atau tingkat harga')
+            ->toContain('Saya bisa menjawab');
+    }
 
     Http::assertNothingSent();
 });
@@ -609,7 +680,7 @@ test('the chatbot explains website features using live semantic graph counts', f
         ->assertOk()
         ->assertJsonPath('intent.type', 'site_info')
         ->assertJsonPath('results_count', 1)
-        ->assertJsonPath('reply', 'SumatraMall membantu menjelajahi data mall dan toko melalui pencarian semantik. Fitur yang tersedia mencakup perbandingan mall, rekomendasi kategori, estimasi tingkat harga, filter buka sekarang, dan rute multi-stop dengan OpenStreetMap. Data graph saat ini: 40 mall, 120 toko, 10 provinsi, dan 8 kategori.');
+        ->assertJsonPath('reply', 'SumatraMall membantu menjelajahi data mall dan toko melalui pencarian semantik. Chat dapat mencari mall dan toko berdasarkan kategori/lokasi, menampilkan detail mall, dan menghitung mall terdekat dari lokasi Anda. Data graph saat ini: 40 mall, 120 toko, 10 provinsi, dan 8 kategori.');
 
     Http::assertSent(fn ($request): bool => str_contains(
         rawurldecode($request->url()),
@@ -627,146 +698,96 @@ test('the chatbot understands English store searches and responds in English', f
                 'storeName' => ['value' => 'Cafe Example'],
                 'mallName' => ['value' => 'Sun Plaza'],
                 'city' => ['value' => 'Medan'],
+                'province' => ['value' => 'Sumatera Utara'],
+                'storeCategory' => ['value' => 'Cafe'],
+                'floor' => ['value' => 'GF'],
+                'hours' => ['value' => '10.00 - 22.00'],
+                'website' => ['value' => 'https://example.test'],
             ]]],
         ], 200),
     ]);
 
-    $this->postJson('/chatbot', [
+    $response = $this->postJson('/chatbot', [
         'message' => 'find a cafe in Sun Plaza',
         'locale' => 'en',
     ])->assertOk()
         ->assertJsonPath('intent.type', 'find_store')
-        ->assertJsonPath('reply', "I found 1 store:\n\n- Cafe Example at Sun Plaza (Medan)");
+        ->assertJsonPath('results_count', 1);
+    expect($response->json('reply'))
+        ->toContain('Cafe Example')
+        ->toContain('Sun Plaza')
+        ->toContain('Category: Cafe')
+        ->toContain('Floor: GF')
+        ->toContain('Opening hours on record: 10.00 - 22.00');
+
+    Http::assertSent(fn ($request): bool => str_contains(
+        rawurldecode($request->url()),
+        'CONTAINS(LCASE(STR(?mallName)), LCASE("sun plaza"))',
+    ) && str_contains(
+        rawurldecode($request->url()),
+        'CONTAINS(LCASE(CONCAT(STR(?storeName)',
+    ));
 });
 
-test('OpenAI-compatible chat receives bounded RDF results and returns the assistant reply', function () {
-    config([
-        'services.chat.api_key' => 'test-chat-key',
-        'services.chat.model' => 'test-model',
-        'services.chat.base_url' => 'https://chat.example/v1',
+test('the chatbot finds the nearest malls from browser coordinates using TTL data', function () {
+    Http::fake([
+        '*' => Http::response([
+            'results' => ['bindings' => [
+                [
+                    'mallName' => ['value' => 'Mall B'],
+                    'city' => ['value' => 'Medan'],
+                    'province' => ['value' => 'Sumatera Utara'],
+                    'lat' => ['value' => '3.60'],
+                    'lng' => ['value' => '98.69'],
+                ],
+                [
+                    'mallName' => ['value' => 'Mall A'],
+                    'city' => ['value' => 'Medan'],
+                    'province' => ['value' => 'Sumatera Utara'],
+                    'lat' => ['value' => '3.581'],
+                    'lng' => ['value' => '98.680'],
+                ],
+            ]],
+        ], 200),
     ]);
-    Http::fake(function ($request) {
-        if (str_contains($request->url(), '/chat/completions')) {
-            return Http::response([
-                'choices' => [[
-                    'message' => ['content' => 'Cafe Example is in Sun Plaza, Medan.'],
-                ]],
-            ], 200);
-        }
 
-        return Http::response([
-            'results' => ['bindings' => [[
-                'storeName' => ['value' => 'Cafe Example'],
-                'mallName' => ['value' => 'Sun Plaza'],
-                'city' => ['value' => 'Medan'],
-                'category' => ['value' => 'Food & Beverage'],
-            ]]],
-        ], 200);
-    });
+    $response = $this->postJson('/chatbot', [
+        'message' => 'Mall paling dekat dengan saya',
+        'latitude' => 3.58,
+        'longitude' => 98.67,
+    ])->assertOk()->assertJsonPath('intent.type', 'nearest_mall');
 
-    $this->postJson('/chatbot', [
-        'message' => 'find a cafe in Sun Plaza',
-        'locale' => 'en',
-    ])->assertOk()
-        ->assertJsonPath('reply', 'Cafe Example is in Sun Plaza, Medan.')
-        ->assertJsonPath('ai_enabled', true)
-        ->assertJsonPath('notice', null);
+    expect($response->json('reply'))->toStartWith('Mall terdekat berdasarkan jarak garis lurus:')
+        ->toContain('Mall A')
+        ->toContain('Mall B');
+    expect(strpos($response->json('reply'), 'Mall A'))
+        ->toBeLessThan(strpos($response->json('reply'), 'Mall B'));
 
-    Http::assertSent(fn ($request): bool => str_contains($request->url(), '/chat/completions')
-        && $request->hasHeader('Authorization', 'Bearer test-chat-key')
-        && data_get($request->data(), 'model') === 'test-model'
-        && str_contains($request->body(), 'Cafe Example')
-        && str_contains($request->body(), 'English'));
+    Http::assertSent(fn ($request): bool => str_contains(
+        rawurldecode($request->url()),
+        'schema:latitude ?lat ; schema:longitude ?lng',
+    ));
 });
 
-test('NVIDIA chat endpoint URLs are not appended with a duplicate completions path', function () {
-    config([
-        'services.chat.api_key' => 'test-nvidia-key',
-        'services.chat.model' => 'mistralai/mistral-large-4-1t-a52b',
-        'services.chat.base_url' => 'https://integrate.api.nvidia.com/v1/chat/completions',
-    ]);
-    Http::fake(function ($request) {
-        if (str_contains($request->url(), '/chat/completions')) {
-            return Http::response(['choices' => [['message' => ['content' => 'Halo dari NVIDIA.']]]]);
-        }
+test('the chatbot asks for location permission before nearest-mall lookup', function () {
+    Http::fake();
 
-        return Http::response(['results' => ['bindings' => [[
-            'mallCount' => ['value' => '107'],
-            'storeCount' => ['value' => '2872'],
-            'provinceCount' => ['value' => '10'],
-            'categoryCount' => ['value' => '9'],
-        ]]]]);
-    });
-
-    $this->postJson('/chatbot', ['message' => 'Apa fitur website ini?'])
+    $this->postJson('/chatbot', ['message' => 'Mall paling dekat dengan saya'])
         ->assertOk()
-        ->assertJsonPath('reply', 'Halo dari NVIDIA.')
-        ->assertJsonPath('ai_enabled', true);
+        ->assertJsonPath('intent.type', 'nearest_mall')
+        ->assertJsonFragment(['reply' => 'Izinkan akses lokasi di browser, lalu tanyakan kembali agar saya bisa menghitung mall terdekat.']);
 
-    Http::assertSent(fn ($request): bool => $request->url() === 'https://integrate.api.nvidia.com/v1/chat/completions'
-        && $request->hasHeader('Authorization', 'Bearer test-nvidia-key')
-        && data_get($request->data(), 'model') === 'mistralai/mistral-large-4-1t-a52b');
+    Http::assertNothingSent();
 });
 
-test('chat reports NVIDIA authentication and credit errors clearly', function () {
-    config([
-        'services.chat.api_key' => 'test-nvidia-key',
-        'services.chat.model' => 'mistralai/mistral-large-4-1t-a52b',
-        'services.chat.base_url' => 'https://integrate.api.nvidia.com/v1',
+test('the chatbot only uses JSON results from the RDF endpoint and does not call an AI service', function () {
+    Http::fake([
+        '*' => Http::response(['results' => ['bindings' => []]], 200),
     ]);
-    Http::fake(function ($request) {
-        if (str_contains($request->url(), '/chat/completions')) {
-            return Http::response(['detail' => 'Unauthorized'], 401);
-        }
 
-        return Http::response(['results' => ['bindings' => [[
-            'mallCount' => ['value' => '107'],
-            'storeCount' => ['value' => '2872'],
-            'provinceCount' => ['value' => '10'],
-            'categoryCount' => ['value' => '9'],
-        ]]]]);
-    });
+    $this->postJson('/chatbot', ['message' => 'cafe sekitaran Sun Plaza'])->assertOk();
 
-    $this->postJson('/chatbot', ['message' => 'Apa fitur website ini?'])
-        ->assertStatus(503)
-        ->assertJsonPath('message', 'API key NVIDIA tidak valid. Periksa NVIDIA_API_KEY di .env.');
-});
-
-test('AI chat keeps a short conversation history for follow-up mall questions', function () {
-    config([
-        'services.chat.api_key' => 'test-chat-key',
-        'services.chat.model' => 'test-model',
-        'services.chat.base_url' => 'https://chat.example/v1',
-    ]);
-    Http::fake(function ($request) {
-        if (str_contains($request->url(), '/chat/completions')) {
-            return Http::response([
-                'choices' => [['message' => ['content' => 'Here are the matching stores.']]],
-            ]);
-        }
-
-        return Http::response(['results' => ['bindings' => [[
-            'storeName' => ['value' => 'Cafe Example'],
-            'mallName' => ['value' => 'Sun Plaza'],
-            'city' => ['value' => 'Medan'],
-        ]]]]);
-    });
-
-    $sessionId = 'chat_history_test';
-    $this->postJson('/chatbot', [
-        'message' => 'find a cafe in Sun Plaza',
-        'session_id' => $sessionId,
-        'locale' => 'en',
-    ])->assertOk();
-    $this->postJson('/chatbot', [
-        'message' => 'find a store there',
-        'session_id' => $sessionId,
-        'locale' => 'en',
-    ])->assertOk();
-
-    Http::assertSent(fn ($request): bool => str_contains($request->url(), '/chat/completions')
-        && str_contains($request->body(), 'find a cafe in Sun Plaza')
-        && str_contains($request->body(), 'Here are the matching stores.'));
+    Http::assertNotSent(fn ($request): bool => str_contains($request->url(), '/chat/completions'));
 });
 
 test('the chatbot filters mall listings by a recognized city', function () {
@@ -781,6 +802,26 @@ test('the chatbot filters mall listings by a recognized city', function () {
     Http::assertSent(fn ($request): bool => str_contains(
         rawurldecode($request->url()),
         'FILTER(LCASE(STR(?city)) = LCASE("Medan"))',
+    ));
+});
+
+test('the chatbot treats a city in a store question as a city filter rather than a mall name', function () {
+    Http::fake([
+        '*' => Http::response(['results' => ['bindings' => []]], 200),
+    ]);
+
+    $this->postJson('/chatbot', ['message' => 'Toko fashion di Medan'])
+        ->assertOk()
+        ->assertJsonPath('intent.type', 'find_store')
+        ->assertJsonPath('intent.city', 'Medan')
+        ->assertJsonMissingPath('intent.place');
+
+    Http::assertSent(fn ($request): bool => str_contains(
+        rawurldecode($request->url()),
+        'FILTER(LCASE(STR(?city)) = LCASE("Medan"))',
+    ) && ! str_contains(
+        rawurldecode($request->url()),
+        'CONTAINS(LCASE(STR(?mallName))',
     ));
 });
 

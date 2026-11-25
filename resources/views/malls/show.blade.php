@@ -223,6 +223,7 @@ async function initializeMallMap() {
         }).addTo(mallMap);
         const position = await getMallPosition();
         mallMap.setView(position, 16);
+        nearbyMarkerLayer = window.sumateraLeaflet.layerGroup().addTo(mallMap);
         const popup = document.createElement('span');
         popup.textContent = mallName;
         L.marker(position, { icon: L.divIcon({ className: 'mall-map-marker', html: '<span></span>', iconSize: [24, 24], iconAnchor: [12, 12] }) })
@@ -236,41 +237,100 @@ async function initializeMallMap() {
 
 document.addEventListener('DOMContentLoaded', initializeMallMap);
 
+let nearbyMarkerLayer;
+
+function getCurrentPosition() {
+    if (!navigator.geolocation) return Promise.resolve(null);
+
+    return new Promise(resolve => {
+        navigator.geolocation.getCurrentPosition(
+            position => resolve([position.coords.latitude, position.coords.longitude]),
+            () => resolve(null),
+            { enableHighAccuracy: false, maximumAge: 60000, timeout: 8000 }
+        );
+    });
+}
+
+function distanceInMeters(from, to) {
+    const radians = degrees => degrees * Math.PI / 180;
+    const latitudeDelta = radians(to[0] - from[0]);
+    const longitudeDelta = radians(to[1] - from[1]);
+    const a = Math.sin(latitudeDelta / 2) ** 2
+        + Math.cos(radians(from[0])) * Math.cos(radians(to[0])) * Math.sin(longitudeDelta / 2) ** 2;
+
+    return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function formatStraightLineDistance(meters) {
+    return meters >= 1000 ? `${(meters / 1000).toFixed(1)} km` : `${Math.round(meters)} m`;
+}
+
 document.getElementById('load-nearby').addEventListener('click', async event => {
     const button = event.currentTarget;
     button.disabled = true;
     const status = document.getElementById('nearby-status');
     status.textContent = window.sumateraTranslate('nearby_loading');
     try {
-        const position = await getMallPosition();
+        const currentPosition = await getCurrentPosition();
+        const position = currentPosition || await getMallPosition();
+        const locationMessage = window.sumateraTranslate(currentPosition ? 'nearby_origin_current' : 'nearby_origin_mall');
         const query = new URLSearchParams({ lat: position[0], lng: position[1] });
         const response = await fetch(`{{ route('map.nearby') }}?${query}`);
         const data = await response.json();
         if (!response.ok) throw new Error(data.message || window.sumateraTranslate('nearby_unavailable'));
         const results = document.getElementById('nearby-results');
         results.replaceChildren();
-        data.amenities.forEach(amenity => {
+        const amenities = data.amenities
+            .map(amenity => ({
+                ...amenity,
+                distance: distanceInMeters(position, [Number(amenity.lat), Number(amenity.lng)])
+            }))
+            .sort((left, right) => left.distance - right.distance);
+
+        if (nearbyMarkerLayer) nearbyMarkerLayer.clearLayers();
+        if (mallMap) {
+            mallMap.setView(position, 16);
+            nearbyMarkerLayer = nearbyMarkerLayer || window.sumateraLeaflet.layerGroup().addTo(mallMap);
+            const originMarker = window.sumateraLeaflet.circleMarker(position, {
+                radius: 8,
+                color: '#ffffff',
+                weight: 2,
+                fillColor: '#1686ff',
+                fillOpacity: 1
+            });
+            originMarker.bindPopup(document.createTextNode(window.sumateraTranslate(currentPosition ? 'nearby_origin_current' : 'nearby_origin_mall')));
+            nearbyMarkerLayer.addLayer(originMarker);
+        }
+
+        amenities.forEach(amenity => {
             const item = document.createElement('div');
             item.className = 'glass rounded-xl p-4';
             const name = document.createElement('strong');
             name.textContent = amenity.name;
             const type = document.createElement('p');
             type.className = 'text-sm text-gray-400';
-            type.textContent = amenity.type;
-            item.append(name, type);
+            type.textContent = window.sumateraTranslate(amenity.type === 'ATM'
+                ? 'amenity_atm'
+                : amenity.type === 'Restroom' ? 'amenity_restroom' : 'amenity_mosque');
+            const distance = document.createElement('p');
+            distance.className = 'text-xs text-gray-400 mt-2';
+            distance.textContent = window.sumateraTranslate('nearby_distance')
+                .replace(':distance', formatStraightLineDistance(amenity.distance));
+            item.append(name, type, distance);
             results.append(item);
-            if (mallMap) {
+            if (nearbyMarkerLayer) {
                 const L = window.sumateraLeaflet;
                 const popup = document.createElement('span');
                 popup.textContent = `${amenity.name} (${amenity.type})`;
-                L.marker([Number(amenity.lat), Number(amenity.lng)], {
+                nearbyMarkerLayer.addLayer(L.marker([Number(amenity.lat), Number(amenity.lng)], {
                     icon: L.divIcon({ className: 'amenity-map-marker', html: '<span></span>', iconSize: [18, 18], iconAnchor: [9, 9] })
-                }).bindPopup(popup).addTo(mallMap);
+                }).bindPopup(popup));
             }
         });
-        status.textContent = data.amenities.length
-            ? window.sumateraTranslate('nearby_found').replace(':count', data.amenities.length)
+        const resultMessage = amenities.length
+            ? window.sumateraTranslate('nearby_found').replace(':count', amenities.length)
             : window.sumateraTranslate('nearby_none');
+        status.textContent = `${locationMessage} ${resultMessage}`;
     } catch (error) {
         status.textContent = error.message || window.sumateraTranslate('nearby_failed');
     } finally {

@@ -9,10 +9,10 @@
     <div class="mall-landing__inner">
         <section class="mall-landing__hero">
             <div class="mall-landing__intro">
-                <span class="mall-landing__eyebrow" data-i18n="landing_eyebrow">YOUR SUMATRA SHOPPING GUIDE</span>
-                <h1 data-i18n="landing_title" class="mall-landing__title">Temukan mall yang pas untuk hari ini.</h1>
+                <span class="mall-landing__eyebrow" data-i18n="landing_eyebrow">PANDUAN BELANJA DI SUMATERA</span>
+                <h1 data-i18n="landing_title" class="mall-landing__title">Cari mall dan toko, tanpa perlu menebak-nebak.</h1>
                 <p data-i18n="landing_description" class="mall-landing__description">
-                    Lihat pusat belanja yang sedang buka, lalu temukan toko favorit Anda di dalamnya.
+                    Cek mall yang sedang buka, cari toko yang Anda butuhkan, dan lihat lantainya sebelum berangkat.
                 </p>
                 <div class="mall-landing__trust">
                     <span class="mall-landing__trust-dot"></span>
@@ -29,19 +29,25 @@
                         </svg>
                     </span>
                     <div>
-                        <h2 data-i18n="landing_search_title">Cari toko favorit</h2>
-                        <p data-i18n="landing_search_description">Telusuri toko di mall pilihan Anda</p>
+                        <h2 data-i18n="landing_search_title">Apa yang ingin Anda cari?</h2>
+                        <p data-i18n="landing_search_description">Nama toko, kategori, mall, kota, atau lantai</p>
                     </div>
                 </div>
                 <label class="sr-only" for="landing-store-search" data-i18n="field_store_search">Cari nama toko</label>
                 <div class="mall-landing__search-controls">
                     <input id="landing-store-search" type="search" name="search" required
                            data-i18n-placeholder="landing_search_placeholder"
-                           placeholder="Contoh: kopi, fashion, buku">
+                           placeholder="Try : Sun Plaza">
                     <button type="button" class="mall-landing__voice" data-voice-search data-voice-input="landing-store-search"
                             aria-label="Search by voice" title="Search by voice">🎙</button>
                 </div>
                 <p class="mall-landing__location-note" data-voice-search-status data-voice-status-for="landing-store-search" role="status" aria-live="polite"></p>
+                <div class="mall-landing__suggestions" role="group" aria-label="Contoh pencarian">
+                    <span data-i18n="landing_try_search">Coba cari:</span>
+                    <button type="button" data-landing-query="kafe">Kafe</button>
+                    <button type="button" data-landing-query="fashion di Medan">Fashion di Medan</button>
+                    <button type="button" data-landing-query="toko di lantai LG">Toko di lantai LG</button>
+                </div>
                 <label class="sr-only" for="landing-store-mall" data-i18n="field_mall">Mall</label>
                 <select id="landing-store-mall" name="mall">
                     <option value="" data-i18n="landing_any_mall">Semua mall</option>
@@ -151,7 +157,7 @@
             @if(count($openMalls) === 0)
             <div class="mall-landing__empty" id="mall-no-open">
                 <h3 data-i18n="landing_no_open_anywhere">Tidak ada jadwal mall buka yang tersedia saat ini.</h3>
-                <p data-i18n="landing_hours_note">Status buka dihitung dari jam operasional RDF dan mungkin belum mencakup jadwal hari khusus.</p>
+                <p data-i18n="landing_hours_note">Jam mengikuti data mall yang tersedia dan bisa berbeda saat hari libur.</p>
             </div>
             @else
             <button type="button" id="mall-show-more" class="mall-landing__show-more" hidden
@@ -169,6 +175,13 @@
 @push('scripts')
 <script>
 document.addEventListener('DOMContentLoaded', () => {
+    const landingSearch = document.getElementById('landing-store-search');
+    document.querySelectorAll('[data-landing-query]').forEach(button => button.addEventListener('click', () => {
+        if (!landingSearch) return;
+        landingSearch.value = button.dataset.landingQuery;
+        landingSearch.form?.requestSubmit();
+    }));
+
     const cityFilter = document.getElementById('mall-city-filter');
     const cityBubbles = document.querySelectorAll('[data-home-city]');
     const locationButton = document.getElementById('mall-use-location');

@@ -45,12 +45,6 @@ return [
         'geocoding_url' => env('OSM_GEOCODING_URL', 'https://nominatim.openstreetmap.org/search'),
         'user_agent' => env('OSM_USER_AGENT', 'SumateraMallSemanticExplorer/1.0'),
     ],
-    'chat' => [
-        'api_key' => env('NVIDIA_API_KEY', env('CHAT_API_KEY')),
-        'model' => env('NVIDIA_API_MODEL', env('CHAT_API_MODEL', 'mistralai/mistral-large-4-1t-a52b')),
-        'base_url' => env('NVIDIA_API_BASE_URL', env('CHAT_API_BASE_URL', 'https://integrate.api.nvidia.com/v1')),
-        'timeout' => (int) env('NVIDIA_API_TIMEOUT', 60),
-    ],
     'budget' => [
         'price_level_estimates' => [
             1 => (int) env('BUDGET_PRICE_LEVEL_1', 30000),

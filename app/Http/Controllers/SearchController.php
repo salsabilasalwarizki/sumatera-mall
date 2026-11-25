@@ -14,11 +14,20 @@ class SearchController extends Controller
 
     public function index(): View
     {
-        $cities = $this->sparql->query(<<<'SPARQL'
+        $provinces = $this->sparql->query(<<<'SPARQL'
 PREFIX mm: <http://sumateramall.org/ontology#>
 PREFIX schema: <http://schema.org/>
 SELECT DISTINCT ?id ?name WHERE {
+    ?id a mm:Province ; schema:name ?name .
+} ORDER BY ?name
+SPARQL);
+
+        $cities = $this->sparql->query(<<<'SPARQL'
+PREFIX mm: <http://sumateramall.org/ontology#>
+PREFIX schema: <http://schema.org/>
+SELECT DISTINCT ?id ?name ?provinceId WHERE {
     ?id a mm:City ; schema:name ?name .
+    ?mall mm:inCity ?id ; mm:inProvince ?provinceId .
 } ORDER BY ?name
 SPARQL);
 
@@ -30,6 +39,13 @@ SELECT DISTINCT ?id ?name WHERE {
 } ORDER BY ?name
 SPARQL);
 
+        $floors = $this->sparql->query(<<<'SPARQL'
+PREFIX mm: <http://sumateramall.org/ontology#>
+SELECT DISTINCT ?floor WHERE {
+    ?store a mm:Store ; mm:floor ?floor .
+} ORDER BY ?floor
+SPARQL);
+
         $malls = $this->sparql->query(<<<'SPARQL'
 PREFIX mm: <http://sumateramall.org/ontology#>
 PREFIX schema: <http://schema.org/>
@@ -38,15 +54,17 @@ SELECT ?id ?name WHERE {
 } ORDER BY ?name
 SPARQL);
 
-        return view('search.index', compact('cities', 'categories', 'malls'));
+        return view('search.index', compact('provinces', 'cities', 'categories', 'floors', 'malls'));
     }
 
     public function filter(Request $request): View
     {
         $validated = $request->validate([
+            'province' => ['nullable', 'string', 'regex:/\Ahttp:\/\/sumateramall\.org\/resource\/Province\/[a-z0-9_]+\z/'],
             'city' => ['nullable', 'string', 'regex:/\Ahttp:\/\/sumateramall\.org\/resource\/City\/[a-z0-9_]+\z/'],
             'mall' => ['nullable', 'string', 'regex:/\Ahttp:\/\/sumateramall\.org\/resource\/Mall\/[a-z0-9_]+\z/'],
             'category' => ['nullable', 'string', 'regex:/\Ahttp:\/\/sumateramall\.org\/resource\/Category\/[a-z0-9_]+\z/'],
+            'floor' => ['nullable', 'string', 'max:100'],
             'open_now' => ['sometimes', 'boolean'],
             'operational' => ['sometimes', 'boolean'],
             'min_rating' => ['nullable', 'numeric', 'between:0,5'],
@@ -55,6 +73,12 @@ SPARQL);
         ]);
         $filters = [];
         $mallFilters = [];
+
+        if (! empty($validated['province'])) {
+            $provinceFilter = '?provinceRes = '.$this->sparql->internalResource($validated['province'], 'Province');
+            $filters[] = $provinceFilter;
+            $mallFilters[] = $provinceFilter;
+        }
 
         if (! empty($validated['city'])) {
             $cityFilter = '?cityRes = '.$this->sparql->internalResource($validated['city'], 'City');
@@ -70,6 +94,11 @@ SPARQL);
 
         if (! empty($validated['category'])) {
             $filters[] = '?catRes = '.$this->sparql->internalResource($validated['category'], 'Category');
+        }
+
+        if (isset($validated['floor']) && $validated['floor'] !== '') {
+            $floorTerm = $this->sparql->literal(trim($validated['floor']));
+            $filters[] = 'CONTAINS(LCASE(STR(?floor)), LCASE('.$floorTerm.'))';
         }
 
         if (isset($validated['min_rating']) && $validated['min_rating'] !== '') {
@@ -117,7 +146,7 @@ SPARQL;
 PREFIX mm: <http://sumateramall.org/ontology#>
 PREFIX schema: <http://schema.org/>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-SELECT DISTINCT ?resultType ?mallId ?store ?storeName ?mallName ?city ?category ?rating ?status ?floor ?address ?image ?lat ?lng ?priceLevel
+SELECT DISTINCT ?resultType ?mallId ?store ?storeName ?mallName ?city ?province ?category ?rating ?status ?floor ?address ?image ?lat ?lng ?priceLevel
 WHERE {
     {
         ?store a mm:Store ;
@@ -125,8 +154,10 @@ WHERE {
                mm:locatedIn ?mall ;
                mm:hasCategory ?catRes .
         ?mall schema:name ?mallName ;
-              mm:inCity ?cityRes .
+              mm:inCity ?cityRes ;
+              mm:inProvince ?provinceRes .
         ?cityRes schema:name ?city .
+        ?provinceRes schema:name ?province .
         ?catRes schema:name ?category .
         OPTIONAL { ?store mm:rating ?rating }
         OPTIONAL { ?store mm:businessStatus ?status }
@@ -148,8 +179,10 @@ WHERE {
     {
         ?mall a mm:Mall ;
               schema:name ?mallName ;
-              mm:inCity ?cityRes .
+              mm:inCity ?cityRes ;
+              mm:inProvince ?provinceRes .
         ?cityRes schema:name ?city .
+        ?provinceRes schema:name ?province .
         BIND(?mallName AS ?storeName)
         OPTIONAL { ?mall schema:address ?address }
         OPTIONAL { ?mall schema:image ?image }
@@ -221,7 +254,7 @@ SPARQL);
         $tokensWithoutStopWords = array_values(array_filter(
             $tokens,
             fn (string $token): bool => preg_match(
-                '/\A(?:mall|malls|shopping|centre|center|di|ke|dari|dan|yang|the|of|and|in|at)\z/u',
+                '/\A(?:mall|malls|shopping|centre|center|toko|store|stores|shop|shops|lantai|floor|di|ke|dari|dan|yang|the|of|and|in|at)\z/u',
                 $token,
             ) !== 1,
         ));

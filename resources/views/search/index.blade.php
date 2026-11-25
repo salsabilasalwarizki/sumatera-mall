@@ -3,10 +3,11 @@
 @section('title', 'Pencarian Mall & Toko')
 
 @section('content')
-<div class="max-w-5xl mx-auto px-6">
-    <div class="mb-12">
-        <h1 data-i18n="page_search_title" class="font-display text-5xl font-bold mb-3">Pencarian Cerdas</h1>
-        <p data-i18n="page_search_description" class="text-gray-400">Temukan toko dengan filter berbasis Web Semantik</p>
+<div class="max-w-5xl mx-auto px-6 search-page">
+    <div class="mb-10">
+        <p class="search-page__eyebrow" data-i18n="search_eyebrow">PENCARIAN BERBASIS DATA MALL</p>
+        <h1 data-i18n="page_search_title" class="font-display text-5xl font-bold mb-3">Cari toko dengan cara yang lebih mudah</h1>
+        <p data-i18n="page_search_description" class="text-gray-400">Cari berdasarkan nama toko, kategori, lokasi, atau lantai. Hasilnya dicocokkan dengan data mall yang saling terhubung.</p>
     </div>
 
     <form id="advanced-search-form" action="{{ route('search.filter') }}" method="POST" class="glass rounded-3xl p-8 mb-8">
@@ -23,13 +24,27 @@
                 <button type="button" class="bubble-filter" data-search-operational data-i18n="filter_operational">Operasional</button>
             </div>
         </div>
-        <div class="grid md:grid-cols-2 gap-6 mb-6">
+        <section class="search-filter-group mb-6" aria-labelledby="search-location-heading">
+            <h2 id="search-location-heading" class="search-filter-group__title" data-i18n="search_location_heading">Lokasi</h2>
+            <div class="grid md:grid-cols-3 gap-6">
             <div>
-                <label data-i18n="field_city" class="block text-sm font-medium mb-2 text-gray-300">Kota</label>
-                <select name="city" class="w-full glass bg-transparent p-3 rounded-xl border border-white/10 focus:border-neon-cyan/50 focus:outline-none">
+                <label for="search-province" data-i18n="field_province" class="block text-sm font-medium mb-2 text-gray-300">Provinsi</label>
+                <select id="search-province" name="province" class="w-full glass bg-transparent p-3 rounded-xl border border-white/10 focus:border-neon-cyan/50 focus:outline-none">
+                    <option value="" data-i18n="all_provinces">Semua provinsi</option>
+                    @foreach($provinces as $province)
+                    <option value="{{ $province['id'] }}" {{ request('province') == $province['id'] ? 'selected' : '' }}>
+                        {{ $province['name'] }}
+                    </option>
+                    @endforeach
+                </select>
+            </div>
+
+            <div>
+                <label for="search-city" data-i18n="field_city" class="block text-sm font-medium mb-2 text-gray-300">Kota</label>
+                <select id="search-city" name="city" class="w-full glass bg-transparent p-3 rounded-xl border border-white/10 focus:border-neon-cyan/50 focus:outline-none">
                     <option value="" data-i18n="all_cities">Semua Kota</option>
                     @foreach($cities as $c)
-                    <option value="{{ $c['id'] }}" {{ request('city') == $c['id'] ? 'selected' : '' }}>
+                    <option value="{{ $c['id'] }}" data-province="{{ $c['provinceId'] ?? '' }}" {{ request('city') == $c['id'] ? 'selected' : '' }}>
                         {{ $c['name'] }}
                     </option>
                     @endforeach
@@ -37,8 +52,25 @@
             </div>
 
             <div>
-                <label data-i18n="field_category" class="block text-sm font-medium mb-2 text-gray-300">Kategori</label>
-                <select name="category" class="w-full glass bg-transparent p-3 rounded-xl border border-white/10 focus:border-neon-cyan/50 focus:outline-none">
+                <label for="search-mall" data-i18n="field_mall" class="block text-sm font-medium mb-2 text-gray-300">Mall</label>
+                <select id="search-mall" name="mall" class="w-full glass bg-transparent p-3 rounded-xl border border-white/10 focus:border-neon-cyan/50 focus:outline-none">
+                    <option value="" data-i18n="all_malls">Semua Mall</option>
+                    @foreach($malls as $mall)
+                    <option value="{{ $mall['id'] }}" {{ request('mall') == $mall['id'] ? 'selected' : '' }}>
+                        {{ $mall['name'] }}
+                    </option>
+                    @endforeach
+                </select>
+            </div>
+            </div>
+        </section>
+
+        <section class="search-filter-group mb-6" aria-labelledby="search-preferences-heading">
+            <h2 id="search-preferences-heading" class="search-filter-group__title" data-i18n="search_preferences_heading">Preferensi toko</h2>
+            <div class="grid md:grid-cols-2 gap-6">
+            <div>
+                <label for="search-category" data-i18n="field_category" class="block text-sm font-medium mb-2 text-gray-300">Kategori</label>
+                <select id="search-category" name="category" class="w-full glass bg-transparent p-3 rounded-xl border border-white/10 focus:border-neon-cyan/50 focus:outline-none">
                     <option value="" data-i18n="all_categories">Semua Kategori</option>
                     @foreach($categories as $c)
                     <option value="{{ $c['id'] }}" {{ request('category') == $c['id'] ? 'selected' : '' }}>
@@ -49,24 +81,26 @@
             </div>
 
             <div>
-                <label data-i18n="field_mall" class="block text-sm font-medium mb-2 text-gray-300">Mall</label>
-                <select name="mall" class="w-full glass bg-transparent p-3 rounded-xl border border-white/10 focus:border-neon-cyan/50 focus:outline-none">
-                    <option value="" data-i18n="all_malls">Semua Mall</option>
-                    @foreach($malls as $mall)
-                    <option value="{{ $mall['id'] }}" {{ request('mall') == $mall['id'] ? 'selected' : '' }}>
-                        {{ $mall['name'] }}
-                    </option>
-                    @endforeach
-                </select>
-            </div>
-
-            <div>
-                <label data-i18n="field_rating" class="block text-sm font-medium mb-2 text-gray-300">Rating Minimum</label>
-                <select name="min_rating" class="w-full glass bg-transparent p-3 rounded-xl border border-white/10 focus:border-neon-cyan/50 focus:outline-none">
+                <label for="search-rating" data-i18n="field_rating" class="block text-sm font-medium mb-2 text-gray-300">Rating Minimum</label>
+                <select id="search-rating" name="min_rating" class="w-full glass bg-transparent p-3 rounded-xl border border-white/10 focus:border-neon-cyan/50 focus:outline-none">
                     <option value="" data-i18n="all_ratings">Semua Rating</option>
                     <option value="4" {{ request('min_rating') === '4' ? 'selected' : '' }}>4.0+</option>
                     <option value="4.5" {{ request('min_rating') === '4.5' ? 'selected' : '' }}>4.5+</option>
                 </select>
+            </div>
+
+            <div>
+                <label for="search-floor" data-i18n="field_floor" class="block text-sm font-medium mb-2 text-gray-300">Lantai toko</label>
+                <input id="search-floor" name="floor" type="search" list="search-floor-options"
+                       value="{{ request('floor') }}" maxlength="100" autocomplete="off"
+                       data-i18n-placeholder="floor_search_placeholder" placeholder="Contoh: GF, LG, atau 1st Floor"
+                       class="w-full glass bg-transparent p-3 rounded-xl border border-white/10 focus:border-neon-cyan/50 focus:outline-none">
+                <datalist id="search-floor-options">
+                    @foreach($floors as $floor)
+                    <option value="{{ $floor['floor'] }}"></option>
+                    @endforeach
+                </datalist>
+                <p class="mt-2 text-xs text-gray-500" data-i18n="floor_filter_note">Pilihan mengikuti lantai yang tercatat pada data toko.</p>
             </div>
 
             <div>
@@ -98,9 +132,10 @@
                 </label>
             </div>
         </div>
+        </section>
 
         <div class="mb-6">
-            <label data-i18n="field_store_search" class="block text-sm font-medium mb-2 text-gray-300">Cari nama toko</label>
+            <label for="search-store-input" data-i18n="field_store_search" class="block text-sm font-medium mb-2 text-gray-300">Cari nama toko</label>
             <div class="flex gap-2">
             <input type="search" name="search" value="{{ request('search') }}" maxlength="100"
                    id="search-store-input"
@@ -129,11 +164,28 @@
 <script>
 document.addEventListener('DOMContentLoaded', () => {
     const form = document.getElementById('advanced-search-form');
+    const provinceSelect = form?.querySelector('[name="province"]');
+    const citySelect = form?.querySelector('[name="city"]');
     const categorySelect = form?.querySelector('[name="category"]');
     const openNow = form?.querySelector('[name="open_now"]');
     const minRating = form?.querySelector('[name="min_rating"]');
     const operational = form?.querySelector('[name="operational"]');
     const chips = document.querySelectorAll('[data-search-category], [data-search-open], [data-search-rating], [data-search-operational]');
+
+    const filterCities = () => {
+        if (!provinceSelect || !citySelect) return;
+        const selectedProvince = provinceSelect.value;
+        const selectedCity = citySelect.selectedOptions[0];
+        [...citySelect.options].forEach(option => {
+            option.hidden = option.value !== '' && selectedProvince !== ''
+                && option.dataset.province !== selectedProvince;
+        });
+        if (selectedCity?.value && selectedCity.dataset.province !== selectedProvince && selectedProvince !== '') {
+            citySelect.value = '';
+        }
+    };
+    provinceSelect?.addEventListener('change', filterCities);
+    filterCities();
 
     chips.forEach(chip => chip.addEventListener('click', () => {
         if (chip.hasAttribute('data-search-category')) categorySelect.value = chip.dataset.searchCategory;

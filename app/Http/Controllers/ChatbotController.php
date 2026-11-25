@@ -3,7 +3,6 @@
 namespace App\Http\Controllers;
 
 use App\Models\ChatLog;
-use App\Services\OpenAICompatibleChatService;
 use App\Services\SparqlService;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
@@ -18,7 +17,6 @@ class ChatbotController extends Controller
 {
     public function __construct(
         private readonly SparqlService $sparql,
-        private readonly OpenAICompatibleChatService $chatCompletion,
     ) {}
 
     public function chat(Request $request): JsonResponse
@@ -27,6 +25,8 @@ class ChatbotController extends Controller
             'message' => ['required', 'string', 'max:1000'],
             'session_id' => ['nullable', 'string', 'max:80', 'regex:/\A[a-zA-Z0-9_-]+\z/'],
             'locale' => ['nullable', 'in:id,en'],
+            'latitude' => ['nullable', 'numeric', 'between:-90,90'],
+            'longitude' => ['nullable', 'numeric', 'between:-180,180'],
         ]);
         $message = trim($validated['message']);
         if ($message === '') {
@@ -35,18 +35,31 @@ class ChatbotController extends Controller
 
         $sessionId = $validated['session_id'] ?? Str::random(24);
         $intent = $this->parseIntent($message);
-        if ($intent['type'] === 'unknown') {
+        if (in_array($intent['type'], ['unknown', 'unsupported_data'], true)) {
             return response()->json([
-                'reply' => ($validated['locale'] ?? 'id') === 'en'
-                    ? 'This question cannot be processed because it is outside the context.'
-                    : 'pertanyaan tidak dapat di proses karena diluar konteks',
-                'ai_enabled' => $this->chatCompletion->isConfigured(),
-                'notice' => null,
+                'reply' => $this->unsupportedQuestionReply(
+                    ($validated['locale'] ?? 'id') === 'en',
+                    $intent['type'] === 'unsupported_data',
+                ),
                 'intent' => $intent,
                 'results_count' => 0,
                 'session_id' => $sessionId,
             ]);
         }
+
+        $locale = $validated['locale'] ?? 'id';
+        if ($intent['type'] === 'nearest_mall'
+            && (! isset($validated['latitude']) || ! isset($validated['longitude']))) {
+            return response()->json([
+                'reply' => $locale === 'en'
+                    ? 'Please allow location access in your browser, then ask again so I can calculate the nearest mall.'
+                    : 'Izinkan akses lokasi di browser, lalu tanyakan kembali agar saya bisa menghitung mall terdekat.',
+                'intent' => $intent,
+                'results_count' => 0,
+                'session_id' => $sessionId,
+            ]);
+        }
+
         $sparql = $this->generateSparql($intent);
 
         try {
@@ -62,72 +75,15 @@ class ChatbotController extends Controller
             ], 503);
         }
 
-        $locale = $validated['locale'] ?? 'id';
-        $aiEnabled = $this->chatCompletion->isConfigured();
-        $notice = null;
-        if ($aiEnabled) {
-            try {
-                $history = ChatLog::query()
-                    ->where('session_id', $sessionId)
-                    ->latest('id')
-                    ->limit(6)
-                    ->get(['user_message', 'bot_reply'])
-                    ->reverse()
-                    ->map(fn (ChatLog $log): array => [
-                        'user' => $log->user_message,
-                        'assistant' => $log->bot_reply,
-                    ])
-                    ->values()
-                    ->all();
-                $reply = $this->chatCompletion->reply($message, $results, $locale, $history);
-            } catch (ConnectionException $exception) {
-                Log::error('SumatraMall chat completion response failed.', [
-                    'exception' => $exception->getMessage(),
-                ]);
-
-                return response()->json([
-                    'message' => $locale === 'en'
-                        ? 'The NVIDIA AI service timed out or is unreachable. Please try again in a moment.'
-                        : 'Layanan AI NVIDIA terlalu lama merespons atau tidak dapat dijangkau. Silakan coba lagi sebentar.',
-                ], 503);
-            } catch (RequestException $exception) {
-                Log::error('SumatraMall chat completion request was rejected.', [
-                    'status' => $exception->response->status(),
-                ]);
-                $message = match ($exception->response->status()) {
-                    401 => $locale === 'en'
-                        ? 'The NVIDIA API key is invalid. Check NVIDIA_API_KEY in .env.'
-                        : 'API key NVIDIA tidak valid. Periksa NVIDIA_API_KEY di .env.',
-                    402 => $locale === 'en'
-                        ? 'The NVIDIA API account has insufficient credits.'
-                        : 'Kredit pada akun NVIDIA API tidak mencukupi.',
-                    429 => $locale === 'en'
-                        ? 'The NVIDIA API rate limit was reached. Please try again shortly.'
-                        : 'Batas request NVIDIA API tercapai. Silakan coba lagi sebentar.',
-                    default => $locale === 'en'
-                        ? 'The NVIDIA AI service rejected the request. Check the model and API settings.'
-                        : 'Layanan AI NVIDIA menolak permintaan. Periksa model dan konfigurasi API.',
-                };
-
-                return response()->json(['message' => $message], 503);
-            } catch (RuntimeException $exception) {
-                Log::error('SumatraMall chat completion returned an invalid response.', [
-                    'exception' => $exception->getMessage(),
-                ]);
-
-                return response()->json([
-                    'message' => $locale === 'en'
-                        ? 'The NVIDIA AI service returned an invalid response. Please try again later.'
-                        : 'Layanan AI NVIDIA mengirim respons yang tidak valid. Silakan coba lagi nanti.',
-                ], 503);
-            }
-        } else {
-            $reply = $this->formatReply($intent, $results, $locale);
-            $notice = $locale === 'en'
-                ? 'AI is not configured yet; this is a rule-based reply.'
-                : 'AI belum dikonfigurasi; jawaban ini menggunakan aturan pencarian.';
+        if ($intent['type'] === 'nearest_mall') {
+            $results = $this->orderMallsByDistance(
+                $results,
+                (float) $validated['latitude'],
+                (float) $validated['longitude'],
+            );
         }
 
+        $reply = $this->formatReply($intent, $results, $locale);
         ChatLog::create([
             'session_id' => $sessionId,
             'user_message' => $message,
@@ -138,37 +94,45 @@ class ChatbotController extends Controller
 
         return response()->json([
             'reply' => $reply,
-            'ai_enabled' => $aiEnabled,
-            'notice' => $notice,
             'intent' => $intent,
             'results_count' => count($results),
             'session_id' => $sessionId,
         ]);
     }
 
+    protected function unsupportedQuestionReply(bool $english, bool $missingGraphFields = false): string
+    {
+        $unavailableData = $missingGraphFields
+            ? ($english
+                ? 'The current graph has no recorded store ratings or price-level values. '
+                : 'Graph saat ini tidak mencatat rating toko atau tingkat harga. ')
+            : '';
+
+        return $unavailableData.($english
+            ? "I can answer questions using the SumatraMall data, such as:\n- Cafes or stores in a mall (e.g. \"cafes around Sun Plaza\")\n- Malls in a city or province\n- Mall address, opening hours, facilities, and website\n- The nearest mall to your current location"
+            : "Saya bisa menjawab pertanyaan berdasarkan data SumatraMall, misalnya:\n- Kafe atau toko di mall (contoh: \"kafe sekitar Sun Plaza\")\n- Daftar mall di kota atau provinsi\n- Alamat, jam operasional, fasilitas, dan situs mall\n- Mall terdekat dari lokasi Anda");
+    }
+
     /**
-     * @return array<string, string>
+     * @return array<string, mixed>
      */
     protected function parseIntent(string $message): array
     {
-        $text = mb_strtolower($message);
+        $text = Str::ascii(mb_strtolower($message));
         $intent = ['type' => 'unknown'];
 
-        if (preg_match('/(fitur|website|situs|aplikasi|sumatramall|tentang kami|cara menggunakan|tentang web|tentang situs|about this website|about sumatramall|website features|what can this site)/u', $text)) {
+        if (preg_match('/\b(rating|rated|terbaik|top|popular|harga|price|budget|biaya|cost|murah|mahal)\b/u', $text)) {
+            $intent['type'] = 'unsupported_data';
+
+            return $intent;
+        }
+
+        if (preg_match('/(fitur|website|situs|aplikasi|sumatramall|tentang kami|cara menggunakan|about this website|about sumatramall|website features|what can this site)/u', $text)) {
             $intent['type'] = 'site_info';
-        } elseif (preg_match('/(buka sekarang|masih buka|jam buka|open now|still open|opening hours)/u', $text)) {
-            $intent['type'] = 'open_now';
-        } elseif (preg_match('/(budget|biaya|estimasi|cost|estimate)/u', $text)) {
-            $intent['type'] = 'budget';
-        } elseif (preg_match('/(top|terbaik|rating|populer|best|highest rated|popular)/u', $text)) {
-            $intent['type'] = 'top_rated';
-        } elseif (preg_match('/(info|tentang|profil|about|profile)/u', $text)
-            && preg_match('/(mall|shopping center|shopping centre)/u', $text)) {
-            $intent['type'] = 'mall_info';
-        } elseif (preg_match('/(kota|daftar mall|provinsi|mall di|city|list malls|province|malls in)/u', $text)) {
+        } elseif (preg_match('/(mall terdekat|terdekat.*mall|mall.*dekat.*saya|nearest mall|mall.*near me|closest mall)/u', $text)) {
+            $intent['type'] = 'nearest_mall';
+        } elseif (preg_match('/(kota|daftar mall|provinsi|mall di|mall.*mana|city|list malls|province|malls in)/u', $text)) {
             $intent['type'] = 'list_by_region';
-        } elseif (preg_match('/(cari|dimana|ada|toko|rekomendasi|find|search|where|store|recommend)/u', $text)) {
-            $intent['type'] = 'find_store';
         }
 
         $provinces = [
@@ -180,7 +144,6 @@ class ChatbotController extends Controller
             'aceh' => 'Aceh',
             'sumut' => 'Sumatera Utara',
             'sumbar' => 'Sumatera Barat',
-            'pekanbaru' => 'Riau',
             'batam' => 'Kepulauan Riau',
             'kepri' => 'Kepulauan Riau',
             'jambi' => 'Jambi',
@@ -222,70 +185,93 @@ class ChatbotController extends Controller
         }
 
         $categories = [
-            'makan' => 'Food & Beverage',
-            'restoran' => 'Food & Beverage',
-            'cafe' => 'Food & Beverage',
-            'coffee' => 'Food & Beverage',
-            'baju' => 'Fashion',
-            'fashion' => 'Fashion',
-            'sepatu' => 'Fashion',
-            'elektronik' => 'Electronics',
-            'hp' => 'Electronics',
-            'bioskop' => 'Entertainment',
-            'nonton' => 'Entertainment',
-            'supermarket' => 'Supermarket',
-            'restaurant' => 'Food & Beverage',
-            'food' => 'Food & Beverage',
-            'dining' => 'Food & Beverage',
-            'clothes' => 'Fashion',
-            'shoes' => 'Fashion',
-            'electronics' => 'Electronics',
-            'phone' => 'Electronics',
-            'cinema' => 'Entertainment',
-            'movie' => 'Entertainment',
+            'cafe' => ['cafe', 'coffee'],
+            'café' => ['cafe', 'coffee'],
+            'kafe' => ['cafe', 'coffee'],
+            'kopi' => ['coffee', 'cafe'],
+            'restaurant' => ['restaurant', 'food', 'fnb'],
+            'restoran' => ['restaurant', 'food', 'fnb'],
+            'makanan' => ['food', 'makanan', 'fnb'],
+            'minuman' => ['beverage', 'minuman', 'fnb'],
+            'fashion' => ['fashion'],
+            'baju' => ['fashion'],
+            'sepatu' => ['fashion'],
+            'clothes' => ['fashion'],
+            'shoes' => ['fashion'],
+            'electronics' => ['electronics'],
+            'elektronik' => ['electronics'],
+            'handphone' => ['electronics'],
+            'bioskop' => ['entertainment'],
+            'cinema' => ['entertainment'],
+            'movie' => ['entertainment'],
+            'supermarket' => ['supermarket'],
         ];
-        foreach ($categories as $keyword => $category) {
+        foreach ($categories as $keyword => $terms) {
             if (str_contains($text, $keyword)) {
-                $intent['category'] = $category;
+                $intent['category_terms'] = $terms;
                 break;
             }
         }
 
-        $malls = [
-            'sun plaza' => 'sun_plaza',
-            'centre point' => 'centre_point_mall',
-            'deli park' => 'deli_park_mall',
-            'medan mall' => 'medan_mall',
-            'nagoya hill' => 'nagoya_hill_mall',
-            'palembang icon' => 'palembang_icon',
-            'grand batam' => 'grand_batam_mall',
-        ];
-        foreach ($malls as $keyword => $mallId) {
-            if (str_contains($text, $keyword)) {
-                $intent['mall'] = $mallId;
-                break;
+        if (preg_match('/\b(?:di|dalam|sekitar(?:an)?|dekat|at|in|around|near)\s+(.+?)\s*$/u', $text, $placeMatch)) {
+            $place = trim(preg_replace('/[?.!,;]+$/u', '', $placeMatch[1]) ?? '');
+            if (isset($intent['city'])) {
+                $normalizedPlace = Str::ascii(mb_strtolower($place));
+                $normalizedCity = Str::ascii(mb_strtolower($intent['city']));
+                if ($normalizedPlace === $normalizedCity) {
+                    $place = '';
+                } elseif (str_ends_with($normalizedPlace, ' '.$normalizedCity)) {
+                    $place = trim(substr($place, 0, -strlen($normalizedCity)));
+                }
+            }
+            $place = trim(preg_replace('/[?.!,;]+$/u', '', $place) ?? $place);
+            if ($place !== '' && ! preg_match('/^(saya|aku|me|my location)$/u', $place)) {
+                $intent['place'] = $place;
             }
         }
-        if ($intent['type'] === 'unknown' && isset($intent['mall'])) {
+
+        if ($intent['type'] === 'list_by_region'
+            && ! isset($intent['city'])
+            && ! isset($intent['province'])
+            && isset($intent['place'])) {
             $intent['type'] = 'mall_info';
-        } elseif ($intent['type'] === 'unknown' && preg_match(
-            '/(mall|toko|belanja|sumatera|sumatra|rute|peta|lokasi|rekomendasi|pencarian|filter|sparql|rdf|semantic|store|shopping|route|map|location|recommendation|search|filter|ontology)/u',
-            $text,
-        )) {
-            $intent['type'] = 'site_info';
+        }
+
+        if ($intent['type'] === 'unknown' && isset($intent['category_terms'])) {
+            $intent['type'] = 'find_store';
+        } elseif ($intent['type'] === 'unknown' && preg_match('/(cari|dimana|ada|toko|store|rekomendasi|find|search|where|recommend)/u', $text)) {
+            $intent['type'] = 'find_store';
+        } elseif ($intent['type'] === 'unknown' && preg_match('/(jam buka|jam operasional|opening hours|alamat|address|website|situs|fasilitas|facility|lantai|floor|mall|shopping center|shopping centre)/u', $text)) {
+            $intent['type'] = 'mall_info';
+        } elseif ($intent['type'] === 'unknown'
+            && preg_match('/(about|profile|info|informasi|tentang)/u', $text)
+            && preg_match('/(mall|plaza|square|center|centre|park)/u', $text)) {
+            $intent['type'] = 'mall_info';
+        }
+
+        if ($intent['type'] === 'mall_info' && ! isset($intent['place'])) {
+            $place = trim(preg_replace(
+                '/\b(?:mall|shopping center|shopping centre|info|informasi|tentang|profil|about|profile|alamat|address|jam buka|jam operasional|opening hours|website|situs|fasilitas|facility|apa|what|is|the|of|di|in)\b/u',
+                ' ',
+                $text,
+            ) ?? '');
+            $place = trim(preg_replace('/\b(?:dan|and|for|to|me)\b/u', ' ', $place) ?? '');
+            $place = trim(preg_replace('/\s+/u', ' ', $place) ?? '');
+            if ($place !== '') {
+                $intent['place'] = $place;
+            }
         }
 
         return $intent;
     }
 
     /**
-     * @param  array<string, string>  $intent
+     * @param  array<string, mixed>  $intent
      */
     protected function generateSparql(array $intent): string
     {
         $prefix = "PREFIX mm: <http://sumateramall.org/ontology#>\n"
-            ."PREFIX schema: <http://schema.org/>\n"
-            ."PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n";
+            ."PREFIX schema: <http://schema.org/>\n";
         if ($intent['type'] === 'site_info') {
             return $prefix.<<<'SPARQL'
 SELECT ?mallCount ?storeCount ?provinceCount ?categoryCount WHERE {
@@ -297,16 +283,20 @@ SELECT ?mallCount ?storeCount ?provinceCount ?categoryCount WHERE {
 SPARQL;
         }
         $provinceFilter = isset($intent['province'])
-            ? '?provinceResource schema:name '.$this->sparql->literal($intent['province'])." .\n"
+            ? 'FILTER(LCASE(STR(?province)) = LCASE('.$this->sparql->literal($intent['province']).'))'
             : '';
         $cityFilter = isset($intent['city'])
             ? 'FILTER(LCASE(STR(?city)) = LCASE('.$this->sparql->literal($intent['city']).'))'
             : '';
-        $categoryFilter = isset($intent['category'])
-            ? 'FILTER(CONTAINS(LCASE(STR(?category)), LCASE('.$this->sparql->literal($intent['category'])."))) \n"
+        $categoryTerms = $intent['category_terms'] ?? [];
+        $categoryFilter = $categoryTerms !== []
+            ? 'FILTER('.implode(' || ', array_map(
+                fn (string $term): string => 'CONTAINS(LCASE(CONCAT(STR(?storeName), " ", ?categoryText, " ", ?storeCategoryText, " ", STR(?categoryResource))), LCASE('.$this->sparql->literal($term).'))',
+                $categoryTerms,
+            )).')'
             : '';
-        $mallFilter = isset($intent['mall'])
-            ? 'FILTER(?mall = <http://sumateramall.org/resource/Mall/'.$intent['mall'].'>)'
+        $mallFilter = isset($intent['place'])
+            ? 'FILTER(CONTAINS(LCASE(STR(?mallName)), LCASE('.$this->sparql->literal((string) $intent['place']).')))'
             : '';
 
         if ($intent['type'] === 'list_by_region') {
@@ -321,11 +311,25 @@ SELECT ?mallName ?city ?province WHERE {
 SPARQL;
         }
 
-        if ($intent['type'] === 'mall_info' && isset($intent['mall'])) {
+        if ($intent['type'] === 'nearest_mall') {
+            return $prefix.<<<'SPARQL'
+SELECT DISTINCT ?mallName ?city ?province ?address ?hours ?lat ?lng WHERE {
+    ?mall a mm:Mall ; schema:name ?mallName ; mm:inCity ?cityResource ; mm:inProvince ?provinceResource ;
+          schema:geo ?geo .
+    ?cityResource schema:name ?city .
+    ?provinceResource schema:name ?province .
+    ?geo schema:latitude ?lat ; schema:longitude ?lng .
+    OPTIONAL { ?mall schema:address ?address }
+    OPTIONAL { ?mall mm:openingHoursText ?hours }
+}
+LIMIT 1000
+SPARQL;
+        }
+
+        if ($intent['type'] === 'mall_info') {
             return $prefix.<<<SPARQL
-SELECT ?mallName ?city ?province ?address ?description ?hours ?website ?wheelchair ?parking ?elevator WHERE {
-    BIND(<http://sumateramall.org/resource/Mall/{$intent['mall']}> AS ?mall)
-    ?mall schema:name ?mallName ; mm:inCity/mm:inProvince ?provinceResource ; mm:inCity ?cityResource .
+SELECT DISTINCT ?mallName ?city ?province ?address ?description ?hours ?website ?wheelchair ?parking ?elevator ?floors WHERE {
+    ?mall a mm:Mall ; schema:name ?mallName ; mm:inCity ?cityResource ; mm:inProvince ?provinceResource .
     ?cityResource schema:name ?city .
     ?provinceResource schema:name ?province .
     OPTIONAL { ?mall schema:address ?address }
@@ -335,70 +339,59 @@ SELECT ?mallName ?city ?province ?address ?description ?hours ?website ?wheelcha
     OPTIONAL { ?mall mm:wheelchairAccessible ?wheelchair }
     OPTIONAL { ?mall mm:hasParking ?parking }
     OPTIONAL { ?mall mm:hasElevator ?elevator }
-}
-SPARQL;
-        }
-
-        if ($intent['type'] === 'budget') {
-            return $prefix.<<<SPARQL
-SELECT ?mallName (AVG(xsd:integer(?priceLevel)) AS ?avgPriceLevel) (COUNT(?priceLevel) AS ?pricedStores) WHERE {
-    ?store a mm:Store ; mm:locatedIn ?mall ; mm:priceLevel ?priceLevel .
-    ?mall schema:name ?mallName .
-    FILTER(xsd:integer(?priceLevel) >= 1 && xsd:integer(?priceLevel) <= 4)
+    OPTIONAL { ?mall mm:numberOfFloors ?floors }
+    {$provinceFilter}
+    {$cityFilter}
     {$mallFilter}
 }
-GROUP BY ?mallName
-ORDER BY DESC(?avgPriceLevel)
+ORDER BY ?mallName
 LIMIT 10
 SPARQL;
         }
 
-        $timeFilter = '';
-        if ($intent['type'] === 'open_now') {
-            $now = now('Asia/Jakarta');
-            $day = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][$now->dayOfWeek];
-            $time = $this->sparql->literal($now->format('H:i:s'));
-            $timeFilter = <<<SPARQL
-    ?store schema:openingHoursSpecification ?spec .
-    ?spec schema:dayOfWeek <http://schema.org/{$day}> ;
-          schema:opens ?opens ; schema:closes ?closes .
-    FILTER({$time}^^xsd:time >= ?opens && {$time}^^xsd:time <= ?closes)
-SPARQL;
-        }
-
-        $rating = in_array($intent['type'], ['top_rated'], true) ? '?store mm:rating ?rating .' : 'OPTIONAL { ?store mm:rating ?rating }';
-        $ordering = $intent['type'] === 'top_rated' ? 'ORDER BY DESC(?rating)' : 'ORDER BY ?storeName';
-        if (! in_array($intent['type'], ['find_store', 'open_now', 'top_rated'], true)) {
+        if ($intent['type'] !== 'find_store') {
             return $prefix.'SELECT ?storeName WHERE { FILTER(false) }';
         }
 
         return $prefix.<<<SPARQL
-SELECT DISTINCT ?storeName ?mallName ?city ?category ?rating WHERE {
+SELECT DISTINCT ?storeName ?mallName ?city ?province ?category ?storeCategory ?floor ?address ?hours ?website ?phone WHERE {
     ?store a mm:Store ; schema:name ?storeName ; mm:locatedIn ?mall ; mm:hasCategory ?categoryResource .
     ?mall schema:name ?mallName ; mm:inCity ?cityResource ; mm:inProvince ?provinceResource .
     ?cityResource schema:name ?city .
     ?provinceResource schema:name ?province .
-    ?categoryResource schema:name ?category .
-    {$rating}
+    OPTIONAL { ?categoryResource schema:name ?category }
+    OPTIONAL { ?store schema:category ?storeCategory }
+    BIND(COALESCE(STR(?category), "") AS ?categoryText)
+    BIND(COALESCE(STR(?storeCategory), "") AS ?storeCategoryText)
+    OPTIONAL { ?store mm:floor ?floor }
+    OPTIONAL { ?store schema:address ?address }
+    OPTIONAL { ?store mm:openingHoursText ?hours }
+    OPTIONAL { ?store schema:url ?website }
+    OPTIONAL { ?store mm:nomorTelepon ?phone }
     {$provinceFilter}
     {$cityFilter}
     {$categoryFilter}
     {$mallFilter}
-    {$timeFilter}
 }
-{$ordering}
-LIMIT 10
+ORDER BY ?storeName
+LIMIT 50
 SPARQL;
     }
 
     /**
-     * @param  array<string, string>  $intent
+     * @param  array<string, mixed>  $intent
      * @param  array<int, array<string, string>>  $results
      */
     protected function formatReply(array $intent, array $results, string $locale = 'id'): string
     {
         $english = $locale === 'en';
         if ($results === []) {
+            if ($intent['type'] === 'nearest_mall') {
+                return $english
+                    ? 'I could not find a mall with recorded coordinates near your location.'
+                    : 'Saya tidak menemukan mall dengan koordinat tercatat untuk menghitung jarak dari lokasi Anda.';
+            }
+
             return $english
                 ? 'Sorry, I could not find matching data. Try different keywords.'
                 : 'Maaf, saya tidak menemukan data yang sesuai. Coba kata kunci lain.';
@@ -406,40 +399,136 @@ SPARQL;
 
         return match ($intent['type']) {
             'site_info' => $english
-                ? 'SumatraMall explores mall and store data with semantic search. It includes mall comparisons, category recommendations, price-level estimates, open-now filters, and multi-stop routes using OpenStreetMap. Current graph totals: '
+                ? 'SumatraMall explores mall and store data with semantic search. It includes mall and store directories, category search, mall details, and nearest-mall lookup from your location. Current graph totals: '
                     .($results[0]['mallCount'] ?? '0').' malls, '.($results[0]['storeCount'] ?? '0').' stores, '
                     .($results[0]['provinceCount'] ?? '0').' provinces, and '.($results[0]['categoryCount'] ?? '0').' categories.'
-                : 'SumatraMall membantu menjelajahi data mall dan toko melalui pencarian semantik. Fitur yang tersedia mencakup perbandingan mall, rekomendasi kategori, estimasi tingkat harga, filter buka sekarang, dan rute multi-stop dengan OpenStreetMap. Data graph saat ini: '
+                : 'SumatraMall membantu menjelajahi data mall dan toko melalui pencarian semantik. Chat dapat mencari mall dan toko berdasarkan kategori/lokasi, menampilkan detail mall, dan menghitung mall terdekat dari lokasi Anda. Data graph saat ini: '
                     .($results[0]['mallCount'] ?? '0').' mall, '.($results[0]['storeCount'] ?? '0').' toko, '
                     .($results[0]['provinceCount'] ?? '0').' provinsi, dan '.($results[0]['categoryCount'] ?? '0').' kategori.',
             'find_store' => ($english ? 'I found ' : 'Saya menemukan ').count($results)
-                .($english ? (count($results) === 1 ? " store:\n\n" : " stores:\n\n") : " toko:\n\n").implode("\n", array_map(
-                    fn (array $row): string => '- '.$row['storeName'].($english ? ' at ' : ' di ').$row['mallName'].' ('.$row['city'].')'
-                        .(isset($row['rating']) ? ' ['.($english ? 'Rating: ' : 'Rating: ').$row['rating'].']' : ''),
-                    array_slice($results, 0, 5),
-                )),
-            'open_now' => ($english ? 'There are ' : 'Saat ini ada ').count($results)
-                .($english ? ' stores recorded as open. For example: ' : ' toko yang tercatat buka. Contoh: ')
-                .implode(', ', array_column(array_slice($results, 0, 3), 'storeName')),
-            'top_rated' => ($english ? "Top-rated stores:\n\n" : "Toko dengan rating tertinggi:\n\n").implode("\n", array_map(
-                fn (array $row): string => '- '.$row['storeName'].' ('.$row['mallName'].', '.$row['city'].') — '.$row['rating'],
-                array_slice($results, 0, 5),
-            )),
+                .($english ? (count($results) === 1 ? " matching store:\n\n" : " matching stores:\n\n") : " toko yang sesuai:\n\n")
+                .implode("\n\n", array_map(
+                    fn (array $row): string => $this->formatStoreRow($row, $english),
+                    array_slice($results, 0, 15),
+                ))
+                .(count($results) > 15
+                    ? ($english
+                        ? "\n\nShowing 15 of ".count($results).' matches.'
+                        : "\n\nMenampilkan 15 dari ".count($results).' hasil.')
+                    : ''),
             'list_by_region' => ($english ? "Mall directory:\n\n" : "Daftar mall:\n\n").implode("\n", array_map(
                 fn (array $row): string => '- '.$row['mallName'].' ('.$row['city'].', '.$row['province'].')',
                 array_slice($results, 0, 20),
             )),
-            'mall_info' => $english
-                ? $results[0]['mallName'].' is in '.$results[0]['city'].', '.$results[0]['province'].(isset($results[0]['address']) ? ' — '.$results[0]['address'] : '')
-                : $results[0]['mallName'].' berada di '.$results[0]['city'].', '.$results[0]['province'].(isset($results[0]['address']) ? ' — '.$results[0]['address'] : ''),
-            'budget' => ($english ? "Estimated price levels from store data:\n\n" : "Perkiraan price level berdasarkan data toko:\n\n").implode("\n", array_map(
-                fn (array $row): string => '- '.$row['mallName'].': level '.($row['avgPriceLevel'] ?? ($english ? 'unavailable' : 'belum tersedia'))
-                    .' ('.$row['pricedStores'].($english ? ' stores recorded)' : ' toko tercatat)'),
-                array_slice($results, 0, 10),
+            'mall_info' => implode("\n\n", array_map(
+                fn (array $row): string => $this->formatMallRow($row, $english),
+                array_slice($results, 0, 5),
             )),
+            'nearest_mall' => ($english ? 'Nearest malls by straight-line distance:\n\n' : 'Mall terdekat berdasarkan jarak garis lurus:\n\n')
+                .implode("\n\n", array_map(
+                    fn (array $row): string => '- '.$row['mallName'].' ('.$row['city'].', '.$row['province'].') — '
+                        .number_format((float) $row['distanceKm'], 2, ',', '.').' km'
+                        .(isset($row['address']) ? "\n  ".($english ? 'Address: ' : 'Alamat: ').$row['address'] : '')
+                        .(isset($row['hours']) ? "\n  ".($english ? 'Hours on record: ' : 'Jam tercatat: ').$row['hours'] : ''),
+                    array_slice($results, 0, 5),
+                ))
+                .($english ? "\n\nDistances are calculated from the coordinates recorded in the mall data." : "\n\nJarak dihitung dari koordinat yang tercatat pada data mall."),
             default => $english
                 ? 'I found '.count($results).' results. Try asking a more specific question.'
                 : 'Saya menemukan '.count($results).' hasil. Coba pertanyaannya lebih spesifik.',
         };
+    }
+
+    /**
+     * @param  array<string, string>  $row
+     */
+    protected function formatStoreRow(array $row, bool $english): string
+    {
+        $details = [
+            $row['storeName'].(isset($row['mallName']) ? ($english ? ' — ' : ' — ').$row['mallName'] : ''),
+        ];
+        foreach ([
+            $english ? 'Location' : 'Lokasi' => isset($row['city'], $row['province'])
+                ? $row['city'].', '.$row['province']
+                : ($row['city'] ?? null),
+            $english ? 'Category' : 'Kategori' => $row['storeCategory'] ?? $row['category'] ?? null,
+            $english ? 'Floor' : 'Lantai' => $row['floor'] ?? null,
+            $english ? 'Address' : 'Alamat' => $row['address'] ?? null,
+            $english ? 'Opening hours on record' : 'Jam buka tercatat' => $row['hours'] ?? null,
+            $english ? 'Phone' : 'Telepon' => $row['phone'] ?? null,
+            $english ? 'Website' : 'Situs' => $row['website'] ?? null,
+        ] as $label => $value) {
+            if ($value !== null && $value !== '') {
+                $details[] = '  '.$label.': '.$value;
+            }
+        }
+
+        return '- '.implode("\n", $details);
+    }
+
+    /**
+     * @param  array<string, string>  $row
+     */
+    protected function formatMallRow(array $row, bool $english): string
+    {
+        $details = [
+            $row['mallName'].' — '.($english ? 'in ' : 'di ').$row['city'].', '.$row['province'],
+        ];
+        foreach ([
+            $english ? 'Address' : 'Alamat' => $row['address'] ?? null,
+            $english ? 'Opening hours on record' : 'Jam operasional tercatat' => $row['hours'] ?? null,
+            $english ? 'Number of floors' : 'Jumlah lantai' => $row['floors'] ?? null,
+            $english ? 'Wheelchair access' : 'Akses kursi roda' => $row['wheelchair'] ?? null,
+            $english ? 'Parking' : 'Parkir' => $row['parking'] ?? null,
+            $english ? 'Elevator' : 'Lift' => $row['elevator'] ?? null,
+            $english ? 'Website' : 'Situs' => $row['website'] ?? null,
+            $english ? 'Description' : 'Deskripsi' => $row['description'] ?? null,
+        ] as $label => $value) {
+            if ($value !== null && $value !== '') {
+                $details[] = '  '.$label.': '.$value;
+            }
+        }
+
+        return implode("\n", $details);
+    }
+
+    /**
+     * @param  array<int, array<string, string>>  $malls
+     * @return array<int, array<string, string>>
+     */
+    protected function orderMallsByDistance(array $malls, float $latitude, float $longitude): array
+    {
+        $malls = array_values(array_filter($malls, fn (array $mall): bool => isset($mall['lat'], $mall['lng'])
+            && is_numeric($mall['lat'])
+            && is_numeric($mall['lng'])
+            && (float) $mall['lat'] >= -90
+            && (float) $mall['lat'] <= 90
+            && (float) $mall['lng'] >= -180
+            && (float) $mall['lng'] <= 180));
+
+        foreach ($malls as &$mall) {
+            $mall['distanceKm'] = (string) $this->distanceInKilometers(
+                $latitude,
+                $longitude,
+                (float) $mall['lat'],
+                (float) $mall['lng'],
+            );
+        }
+        unset($mall);
+
+        usort($malls, fn (array $first, array $second): int => (float) $first['distanceKm'] <=> (float) $second['distanceKm']);
+
+        return $malls;
+    }
+
+    protected function distanceInKilometers(float $fromLatitude, float $fromLongitude, float $toLatitude, float $toLongitude): float
+    {
+        $earthRadiusKm = 6371;
+        $latitudeDelta = deg2rad($toLatitude - $fromLatitude);
+        $longitudeDelta = deg2rad($toLongitude - $fromLongitude);
+        $a = sin($latitudeDelta / 2) ** 2
+            + cos(deg2rad($fromLatitude)) * cos(deg2rad($toLatitude)) * sin($longitudeDelta / 2) ** 2;
+
+        return $earthRadiusKm * 2 * asin(min(1, sqrt($a)));
     }
 }
